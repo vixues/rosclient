@@ -3,7 +3,7 @@ import logging
 import time
 import cv2
 from typing import Any, Dict
-from rosclient import RosClient, MockRosClient # Ensure ros.py is in the same directory
+from ros import RosClient, MockRosClient # Ensure ros.py is in the same directory
 
 
 # --------------------------------------------------------
