@@ -387,10 +387,10 @@ class RosClient(RosClientBase):
         except Exception as e:
             self.log.exception(f"Error handling GPS update: {e}")
 
-    def safe_service_call(self, service_name: str, service_type: str, payload: Dict[str, Any],
+    def service_call(self, service_name: str, service_type: str, payload: Dict[str, Any],
                           timeout: Optional[float] = None, retries: Optional[int] = None) -> Dict[str, Any]:
         """
-        Safely call a ROS service with retry logic.
+        Call a ROS service with retry logic.
         
         Args:
             service_name: Service name
@@ -432,10 +432,10 @@ class RosClient(RosClientBase):
 
         raise last_exc if last_exc is not None else RuntimeError("Unknown service call failure")
 
-    def safe_publish(self, topic_name: str, topic_type: str, message: Dict[str, Any],
+    def publish(self, topic_name: str, topic_type: str, message: Dict[str, Any],
                      retries: Optional[int] = None) -> None:
         """
-        Safely publish to a ROS topic with retry logic.
+        Publish to a ROS topic with retry logic.
         
         Args:
             topic_name: Topic name
