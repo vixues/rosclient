@@ -58,7 +58,7 @@ if client.is_connected():
     print(f"位置: {position}")
 
 # 发送控制命令
-client.safe_publish("/control", "controller_msgs/cmd", {"cmd": 1})
+client.publish("/control", "controller_msgs/cmd", {"cmd": 1})
 
 # 断开连接
 client.terminate()
@@ -123,10 +123,10 @@ client.fetch_point_cloud()        # 获取点云数据
 client.get_latest_point_cloud()    # 获取最新点云
 
 # 消息发布
-client.safe_publish(topic, type, message)  # 安全发布消息
+client.publish(topic, type, message)  # 安全发布消息
 
 # 服务调用
-client.safe_service_call(service, type, payload)  # 安全调用服务
+client.service_call(service, type, payload)  # 安全调用服务
 ```
 
 ### 数据模型
