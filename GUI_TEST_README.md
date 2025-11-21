@@ -14,11 +14,13 @@
 ## 安装依赖
 
 ### 必需依赖
+
 ```bash
 pip install rosclient  # 或从源码安装
 ```
 
 ### 可选依赖（用于图像和点云显示）
+
 ```bash
 pip install opencv-python Pillow matplotlib numpy
 ```
@@ -40,6 +42,7 @@ python rosclient_gui_test.py
 ### 2. 状态监控
 
 显示无人机的实时状态信息，包括：
+
 - 连接状态、解锁状态、飞行模式
 - 电池电量
 - GPS位置（纬度、经度、高度）
@@ -67,10 +70,12 @@ python rosclient_gui_test.py
 ### 5. 控制命令
 
 #### Topic配置
+
 - **Topic名称**: 要发布的Topic名称，例如 `/control`
 - **Topic类型**: Topic的消息类型，例如 `controller_msgs/cmd`
 
 #### 消息编辑
+
 - 在文本框中输入JSON格式的消息内容
 - 可以使用预设命令快速填充：
   - 起飞: `{"cmd": 1}`
@@ -79,21 +84,25 @@ python rosclient_gui_test.py
   - 悬停: `{"cmd": 4}`
 
 #### 发送命令
+
 - 点击"发送命令"按钮发送消息
 - 发送的命令会记录在"命令历史"中
 
 ### 6. 网络测试
 
 #### 测试连接
+
 - 输入要测试的WebSocket地址
 - 设置超时时间（秒）
 - 点击"测试连接"按钮测试连接是否成功
 
 #### 测试Topic
+
 - 测试常见Topic的可用性
 - 需要先连接到ROS才能使用
 
 #### 完整测试
+
 - 执行完整的网络测试，包括：
   1. 连接测试
   2. 状态获取测试
@@ -130,33 +139,39 @@ python rosclient_gui_test.py
 2. 切换到"控制命令"标签页
 3. 配置Topic名称和类型
 4. 在消息编辑器中输入JSON消息，例如：
+
    ```json
    {
        "drone_id": 1,
        "goal": [10.0, 20.0, 5.0]
    }
    ```
+
 5. 点击"发送命令"
 
 ## 故障排除
 
 ### 连接失败
+
 - 检查WebSocket地址是否正确
 - 确认ROS Bridge服务正在运行
 - 检查网络连接和防火墙设置
 - 查看"连接状态"标签页中的错误信息
 
 ### 图像不显示
+
 - 确认已安装 `opencv-python` 和 `Pillow`
 - 检查相机Topic是否正在发布数据
 - 尝试使用"手动获取"按钮
 
 ### 点云不显示
+
 - 确认已安装 `matplotlib` 和 `numpy`
 - 检查点云Topic是否正在发布数据
 - 确认点云数据格式正确
 
 ### 命令发送失败
+
 - 确认已连接到ROS
 - 检查Topic名称和类型是否正确
 - 确认消息格式为有效的JSON
@@ -180,4 +195,3 @@ python rosclient_gui_test.py
 ## 许可证
 
 与主项目相同。
-
