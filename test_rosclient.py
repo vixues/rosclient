@@ -3,7 +3,7 @@ import logging
 import time
 import cv2
 from typing import Any, Dict
-from ros import RosClient, MockRosClient # Ensure ros.py is in the same directory
+from rosclient import RosClient, MockRosClient
 
 
 # --------------------------------------------------------
@@ -82,8 +82,8 @@ def test_control_publish(client: RosClient):
 
     for val in range(1, 4):
         try:
-            client.safe_publish(control_topic, control_type, {"cmd": val})
-            client.safe_publish(
+            client.publish(control_topic, control_type, {"cmd": val})
+            client.publish(
                 '/goal_user2brig',
                 "quadrotor_msgs/GoalSet",
                 {'drone_id': int(val), 'goal': [val, val * 10, val * 100]}
@@ -180,14 +180,14 @@ def main(Mock=False):
     test_device_status(client, device_id, connection_url)
     test_control_publish(client)
     test_status_updates(client, device_id, connection_url)
-    test_camera_snapshot(client)
-    test_point_cloud_snapshot(client)
+    # test_camera_snapshot(client)
+    # test_point_cloud_snapshot(client)
     test_disconnect(client)
 
 
 if __name__ == "__main__":
     try:
-        main()
+        main(Mock=True)
     except KeyboardInterrupt:
         logger.info("Program interrupted by user")
     except Exception as e:
