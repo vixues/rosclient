@@ -590,7 +590,7 @@ class RosClientGUITest:
                 return
                 
             # Send command
-            self.client.safe_publish(topic, topic_type, message)
+            self.client.publish(topic, topic_type, message)
             
             # Log to history
             timestamp = time.strftime("%H:%M:%S")
@@ -707,7 +707,7 @@ class RosClientGUITest:
                 # Test 3: Publish
                 self.test_results.insert(tk.END, "\n[3/3] 测试消息发布...\n")
                 try:
-                    test_client.safe_publish("/test", "std_msgs/String", {"data": "test"})
+                    test_client.publish("/test", "std_msgs/String", {"data": "test"})
                     self.test_results.insert(tk.END, "  ✓ 消息发布成功\n")
                 except Exception as e:
                     self.test_results.insert(tk.END, f"  ✗ 消息发布失败: {e}\n")
