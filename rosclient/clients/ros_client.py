@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import base64
 import logging
+import queue
 import random
 import threading
 import time
@@ -50,6 +51,12 @@ class RosClient(RosClientBase):
         self._ros: Optional[roslibpy.Ros] = None
         self._ts_mgr: Optional[TopicServiceManager] = None
         
+        # High-frequency cache for images and point clouds
+        # Use queues with maxsize to keep only the latest frames (drop old ones)
+        self._image_cache: queue.Queue = queue.Queue(maxsize=3)  # Keep latest 3 frames
+        self._pointcloud_cache: queue.Queue = queue.Queue(maxsize=3)  # Keep latest 3 frames
+        
+        # Legacy support - keep latest for backward compatibility
         self._latest_image: Optional[Tuple[np.ndarray, float]] = None
         self._latest_point_cloud: Optional[Tuple[np.ndarray, float]] = None
 
@@ -196,35 +203,48 @@ class RosClient(RosClientBase):
     def update_camera(self, msg: Dict[str, Any]) -> None:
         """Receive camera image messages and convert to OpenCV format."""
         try:
-            with self._lock:
-                frame = None
-                # CompressedImage: typically has 'data' with base64 or raw bytes
-                if "data" in msg and isinstance(msg["data"], (bytes, bytearray)):
-                    np_arr = np.frombuffer(msg["data"], np.uint8)
-                    frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
-                elif "data" in msg and isinstance(msg["data"], str):
-                    img_data = base64.b64decode(msg["data"])
-                    np_arr = np.frombuffer(img_data, np.uint8)
-                    frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
-                elif "encoding" in msg and "data" in msg:
-                    height = int(msg.get("height", 0))
-                    width = int(msg.get("width", 0))
-                    encoding = msg.get("encoding", "bgr8")
-                    channels = 3 if encoding in ("rgb8", "bgr8") else 1
-                    img_data = np.frombuffer(msg["data"], dtype=np.uint8)
-                    if height > 0 and width > 0 and img_data.size == height * width * channels:
-                        frame = img_data.reshape((height, width, channels))
-                    else:
-                        self.log.debug("Raw image shape mismatch; cannot reshape")
+            frame = None
+            # CompressedImage: typically has 'data' with base64 or raw bytes
+            if "data" in msg and isinstance(msg["data"], (bytes, bytearray)):
+                np_arr = np.frombuffer(msg["data"], np.uint8)
+                frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+            elif "data" in msg and isinstance(msg["data"], str):
+                img_data = base64.b64decode(msg["data"])
+                np_arr = np.frombuffer(img_data, np.uint8)
+                frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+            elif "encoding" in msg and "data" in msg:
+                height = int(msg.get("height", 0))
+                width = int(msg.get("width", 0))
+                encoding = msg.get("encoding", "bgr8")
+                channels = 3 if encoding in ("rgb8", "bgr8") else 1
+                img_data = np.frombuffer(msg["data"], dtype=np.uint8)
+                if height > 0 and width > 0 and img_data.size == height * width * channels:
+                    frame = img_data.reshape((height, width, channels))
                 else:
-                    self.log.warning("Received unknown camera message format")
-                    return
+                    self.log.debug("Raw image shape mismatch; cannot reshape")
+            else:
+                self.log.warning("Received unknown camera message format")
+                return
 
-                if frame is None:
-                    self.log.warning("Failed to decode camera frame")
-                    return
+            if frame is None:
+                self.log.warning("Failed to decode camera frame")
+                return
 
-                timestamp = time.time()
+            timestamp = time.time()
+            
+            # Update cache (non-blocking, drop old frames if queue is full)
+            try:
+                self._image_cache.put_nowait((frame, timestamp))
+            except queue.Full:
+                # Queue is full, remove oldest and add new
+                try:
+                    self._image_cache.get_nowait()
+                    self._image_cache.put_nowait((frame, timestamp))
+                except queue.Empty:
+                    pass
+            
+            # Update legacy latest for backward compatibility
+            with self._lock:
                 self._latest_image = (frame, timestamp)
                 self._state.last_updated = timestamp
 
@@ -285,21 +305,51 @@ class RosClient(RosClientBase):
 
     def get_latest_image(self) -> Optional[Tuple[np.ndarray, float]]:
         """
-        Get the latest received image.
+        Get the latest received image from cache (non-blocking).
         
         Returns:
             Tuple of (image, timestamp) or None
         """
+        # Try to get from cache first (non-blocking, fastest)
+        try:
+            # Get all available frames and keep only the latest
+            latest = None
+            while True:
+                try:
+                    latest = self._image_cache.get_nowait()
+                except queue.Empty:
+                    break
+            if latest:
+                return latest
+        except Exception:
+            pass
+        
+        # Fallback to legacy latest
         with self._lock:
             return getattr(self, "_latest_image", None)
 
     def get_latest_point_cloud(self) -> Optional[Tuple[np.ndarray, float]]:
         """
-        Get the latest received point cloud.
+        Get the latest received point cloud from cache (non-blocking).
         
         Returns:
             Tuple of (points array, timestamp) or None
         """
+        # Try to get from cache first (non-blocking, fastest)
+        try:
+            # Get all available frames and keep only the latest
+            latest = None
+            while True:
+                try:
+                    latest = self._pointcloud_cache.get_nowait()
+                except queue.Empty:
+                    break
+            if latest:
+                return latest
+        except Exception:
+            pass
+        
+        # Fallback to legacy latest
         with self._lock:
             return getattr(self, "_latest_point_cloud", None)
 
@@ -309,6 +359,19 @@ class RosClient(RosClientBase):
             result = self._decode_point_cloud(msg)
             if result:
                 points, ts = result
+                
+                # Update cache (non-blocking, drop old frames if queue is full)
+                try:
+                    self._pointcloud_cache.put_nowait((points, ts))
+                except queue.Full:
+                    # Queue is full, remove oldest and add new
+                    try:
+                        self._pointcloud_cache.get_nowait()
+                        self._pointcloud_cache.put_nowait((points, ts))
+                    except queue.Empty:
+                        pass
+                
+                # Update legacy latest for backward compatibility
                 with self._lock:
                     self._latest_point_cloud = (points, ts)
                     self._state.last_updated = ts

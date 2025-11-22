@@ -1,8 +1,10 @@
 """Mock ROS client for testing."""
 import logging
+import queue
 import random
 import threading
 import time
+from pathlib import Path
 from typing import Optional, Dict, Any, List, Tuple
 
 try:
@@ -33,7 +35,13 @@ class MockRosClient(RosClientBase):
         
         Args:
             connection_str: Connection string (for compatibility)
-            config: Optional configuration dictionary
+            config: Optional configuration dictionary. Supported options:
+                - real_image_path: Path to a single image file or directory containing images
+                                  (supports .jpg, .jpeg, .png, .bmp, .tiff, .tif)
+                - real_pointcloud_path: Path to a single point cloud file or directory containing point clouds
+                                       (supports .npy, .ply, .pcd)
+                - image_update_interval: Update interval for images in seconds (default: 0.1)
+                - pointcloud_update_interval: Update interval for point clouds in seconds (default: 0.1)
         """
         super().__init__(connection_str, config=config)
         self._config.setdefault("service_call_timeout", 5.0)
@@ -62,7 +70,31 @@ class MockRosClient(RosClientBase):
         self._pc_update_thread: Optional[threading.Thread] = None
         self._stop_updates = threading.Event()
         
-        # Start background threads to generate random data
+        # High-frequency cache for images and point clouds
+        # Use queues with maxsize to keep only the latest frames (drop old ones)
+        self._image_cache: queue.Queue = queue.Queue(maxsize=5)  # Keep latest 5 frames
+        self._pointcloud_cache: queue.Queue = queue.Queue(maxsize=5)  # Keep latest 5 frames
+        
+        # Configuration for real data sources
+        self._real_image_path: Optional[str] = self._config.get("real_image_path")
+        self._real_pointcloud_path: Optional[str] = self._config.get("real_pointcloud_path")
+        # Reduced intervals for higher refresh rate (default: 0.033s = ~30 FPS)
+        self._image_update_interval: float = self._config.get("image_update_interval", 0.033)
+        self._pc_update_interval: float = self._config.get("pointcloud_update_interval", 0.033)
+        
+        # For cycling through multiple files
+        self._image_files: List[str] = []
+        self._pc_files: List[str] = []
+        self._current_image_idx: int = 0
+        self._current_pc_idx: int = 0
+        
+        # Load real data if specified
+        if self._real_image_path:
+            self._load_image_files()
+        if self._real_pointcloud_path:
+            self._load_pointcloud_files()
+        
+        # Start background threads to generate random data or load real data
         self._start_mock_data_generation()
 
     def is_connected(self) -> bool:
@@ -92,38 +124,246 @@ class MockRosClient(RosClientBase):
             self._connection_state = ConnectionState.DISCONNECTED
         self.log.debug("Mock: terminated")
         
+    def _load_image_files(self):
+        """Load image files from the specified path."""
+        if not self._real_image_path:
+            return
+            
+        path = Path(self._real_image_path)
+        image_extensions = {'.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.tif'}
+        
+        if path.is_file():
+            if path.suffix.lower() in image_extensions:
+                self._image_files = [str(path)]
+                self.log.info(f"Loaded single image file: {path}")
+            else:
+                self.log.warning(f"Unsupported image format: {path.suffix}")
+        elif path.is_dir():
+            # Load all image files from directory
+            self._image_files = [
+                str(p) for p in path.iterdir()
+                if p.is_file() and p.suffix.lower() in image_extensions
+            ]
+            self._image_files.sort()
+            self.log.info(f"Loaded {len(self._image_files)} image files from directory: {path}")
+        else:
+            self.log.warning(f"Image path does not exist: {path}")
+            
+    def _load_pointcloud_files(self):
+        """Load point cloud files from the specified path."""
+        if not self._real_pointcloud_path:
+            return
+            
+        path = Path(self._real_pointcloud_path)
+        pc_extensions = {'.npy', '.ply', '.pcd'}
+        
+        if path.is_file():
+            if path.suffix.lower() in pc_extensions:
+                self._pc_files = [str(path)]
+                self.log.info(f"Loaded single point cloud file: {path}")
+            else:
+                self.log.warning(f"Unsupported point cloud format: {path.suffix}")
+        elif path.is_dir():
+            # Load all point cloud files from directory
+            self._pc_files = [
+                str(p) for p in path.iterdir()
+                if p.is_file() and p.suffix.lower() in pc_extensions
+            ]
+            self._pc_files.sort()
+            self.log.info(f"Loaded {len(self._pc_files)} point cloud files from directory: {path}")
+        else:
+            self.log.warning(f"Point cloud path does not exist: {path}")
+            
+    def _load_image_file(self, file_path: str) -> Optional[np.ndarray]:
+        """Load an image file."""
+        if not HAS_CV2 or not HAS_NUMPY:
+            return None
+        try:
+            img = cv2.imread(file_path)
+            if img is None:
+                self.log.warning(f"Failed to load image: {file_path}")
+                return None
+            # Convert BGR to RGB
+            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            return img
+        except Exception as e:
+            self.log.error(f"Error loading image {file_path}: {e}")
+            return None
+            
+    def _load_pointcloud_file(self, file_path: str) -> Optional[np.ndarray]:
+        """Load a point cloud file."""
+        if not HAS_NUMPY:
+            return None
+        try:
+            path = Path(file_path)
+            suffix = path.suffix.lower()
+            
+            if suffix == '.npy':
+                points = np.load(file_path)
+                # Ensure it's a 2D array with 3 columns (x, y, z)
+                if points.ndim == 1:
+                    return None
+                if points.ndim == 2 and points.shape[1] >= 3:
+                    return points[:, :3]  # Take only first 3 columns
+                return None
+            elif suffix == '.ply':
+                # Simple PLY loader (ASCII format)
+                return self._load_ply_file(file_path)
+            elif suffix == '.pcd':
+                # Simple PCD loader (ASCII format)
+                return self._load_pcd_file(file_path)
+            else:
+                self.log.warning(f"Unsupported point cloud format: {suffix}")
+                return None
+        except Exception as e:
+            self.log.error(f"Error loading point cloud {file_path}: {e}")
+            return None
+            
+    def _load_ply_file(self, file_path: str) -> Optional[np.ndarray]:
+        """Load a PLY file (ASCII format)."""
+        try:
+            points = []
+            with open(file_path, 'r') as f:
+                header_ended = False
+                for line in f:
+                    line = line.strip()
+                    if line == "end_header":
+                        header_ended = True
+                        continue
+                    if not header_ended:
+                        continue
+                    if not line:
+                        continue
+                    parts = line.split()
+                    if len(parts) >= 3:
+                        try:
+                            x, y, z = float(parts[0]), float(parts[1]), float(parts[2])
+                            points.append([x, y, z])
+                        except ValueError:
+                            continue
+            if points:
+                return np.array(points, dtype=np.float32)
+            return None
+        except Exception as e:
+            self.log.error(f"Error loading PLY file {file_path}: {e}")
+            return None
+            
+    def _load_pcd_file(self, file_path: str) -> Optional[np.ndarray]:
+        """Load a PCD file (ASCII format)."""
+        try:
+            points = []
+            with open(file_path, 'r') as f:
+                header_ended = False
+                for line in f:
+                    line = line.strip()
+                    if line.startswith("DATA"):
+                        if "ascii" in line.lower():
+                            header_ended = True
+                        continue
+                    if not header_ended:
+                        continue
+                    if not line or line.startswith("#"):
+                        continue
+                    parts = line.split()
+                    if len(parts) >= 3:
+                        try:
+                            x, y, z = float(parts[0]), float(parts[1]), float(parts[2])
+                            points.append([x, y, z])
+                        except ValueError:
+                            continue
+            if points:
+                return np.array(points, dtype=np.float32)
+            return None
+        except Exception as e:
+            self.log.error(f"Error loading PCD file {file_path}: {e}")
+            return None
+    
     def _start_mock_data_generation(self):
-        """Start background threads to generate random image and point cloud data."""
+        """Start background threads to generate random image and point cloud data or load real data."""
         def generate_image():
             while not self._stop_updates.is_set():
                 if HAS_CV2 and HAS_NUMPY:
-                    # Generate random image (640x480 RGB)
-                    img = np.random.randint(0, 255, (480, 640, 3), dtype=np.uint8)
-                    # Add some patterns to make it more interesting
-                    cv2.circle(img, (320, 240), 100, (255, 255, 255), -1)
-                    cv2.putText(img, "MOCK", (250, 250), cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 0, 0), 3)
+                    img = None
+                    
+                    # Try to load real image if available
+                    if self._image_files:
+                        file_path = self._image_files[self._current_image_idx]
+                        img = self._load_image_file(file_path)
+                        if img is not None:
+                            # Cycle to next image
+                            self._current_image_idx = (self._current_image_idx + 1) % len(self._image_files)
+                    
+                    # Fall back to random generation if no real image loaded
+                    if img is None:
+                        # Generate random image (640x480 RGB)
+                        img = np.random.randint(0, 255, (480, 640, 3), dtype=np.uint8)
+                        # Add some patterns to make it more interesting
+                        cv2.circle(img, (320, 240), 100, (255, 255, 255), -1)
+                        cv2.putText(img, "MOCK", (250, 250), cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 0, 0), 3)
+                    
                     timestamp = time.time()
+                    
+                    # Update cache (non-blocking, drop old frames if queue is full)
+                    try:
+                        self._image_cache.put_nowait((img, timestamp))
+                    except queue.Full:
+                        # Queue is full, remove oldest and add new
+                        try:
+                            self._image_cache.get_nowait()
+                            self._image_cache.put_nowait((img, timestamp))
+                        except queue.Empty:
+                            pass
+                    
+                    # Update legacy latest for backward compatibility
                     with self._lock:
                         self._latest_image = (img, timestamp)
-                time.sleep(0.5)  # Update every 0.5 seconds
+                        
+                time.sleep(self._image_update_interval)
                 
         def generate_pointcloud():
             while not self._stop_updates.is_set():
                 if HAS_NUMPY:
-                    # Generate random point cloud (1000-5000 points)
-                    num_points = random.randint(1000, 5000)
-                    # Generate points in a sphere-like shape
-                    theta = np.random.uniform(0, 2 * np.pi, num_points)
-                    phi = np.random.uniform(0, np.pi, num_points)
-                    r = np.random.uniform(1, 5, num_points)
-                    x = r * np.sin(phi) * np.cos(theta)
-                    y = r * np.sin(phi) * np.sin(theta)
-                    z = r * np.cos(phi)
-                    points = np.column_stack([x, y, z])
+                    points = None
+                    
+                    # Try to load real point cloud if available
+                    if self._pc_files:
+                        file_path = self._pc_files[self._current_pc_idx]
+                        points = self._load_pointcloud_file(file_path)
+                        if points is not None:
+                            # Cycle to next point cloud
+                            self._current_pc_idx = (self._current_pc_idx + 1) % len(self._pc_files)
+                    
+                    # Fall back to random generation if no real point cloud loaded
+                    if points is None:
+                        # Generate random point cloud (1000-5000 points)
+                        num_points = random.randint(1000, 5000)
+                        # Generate points in a sphere-like shape
+                        theta = np.random.uniform(0, 2 * np.pi, num_points)
+                        phi = np.random.uniform(0, np.pi, num_points)
+                        r = np.random.uniform(1, 5, num_points)
+                        x = r * np.sin(phi) * np.cos(theta)
+                        y = r * np.sin(phi) * np.sin(theta)
+                        z = r * np.cos(phi)
+                        points = np.column_stack([x, y, z])
+                    
                     timestamp = time.time()
+                    
+                    # Update cache (non-blocking, drop old frames if queue is full)
+                    try:
+                        self._pointcloud_cache.put_nowait((points, timestamp))
+                    except queue.Full:
+                        # Queue is full, remove oldest and add new
+                        try:
+                            self._pointcloud_cache.get_nowait()
+                            self._pointcloud_cache.put_nowait((points, timestamp))
+                        except queue.Empty:
+                            pass
+                    
+                    # Update legacy latest for backward compatibility
                     with self._lock:
                         self._latest_point_cloud = (points, timestamp)
-                time.sleep(1.0)  # Update every second
+                        
+                time.sleep(self._pc_update_interval)
                 
         if HAS_CV2 and HAS_NUMPY:
             self._image_update_thread = threading.Thread(target=generate_image, daemon=True)
@@ -226,21 +466,51 @@ class MockRosClient(RosClientBase):
             
     def get_latest_image(self) -> Optional[Tuple]:
         """
-        Get the latest mock image.
+        Get the latest mock image from cache (non-blocking).
         
         Returns:
             Tuple of (image array, timestamp) or None
         """
+        # Try to get from cache first (non-blocking, fastest)
+        try:
+            # Get all available frames and keep only the latest
+            latest = None
+            while True:
+                try:
+                    latest = self._image_cache.get_nowait()
+                except queue.Empty:
+                    break
+            if latest:
+                return latest
+        except Exception:
+            pass
+        
+        # Fallback to legacy latest
         with self._lock:
             return getattr(self, "_latest_image", None)
             
     def get_latest_point_cloud(self) -> Optional[Tuple]:
         """
-        Get the latest mock point cloud.
+        Get the latest mock point cloud from cache (non-blocking).
         
         Returns:
             Tuple of (points array, timestamp) or None
         """
+        # Try to get from cache first (non-blocking, fastest)
+        try:
+            # Get all available frames and keep only the latest
+            latest = None
+            while True:
+                try:
+                    latest = self._pointcloud_cache.get_nowait()
+                except queue.Empty:
+                    break
+            if latest:
+                return latest
+        except Exception:
+            pass
+        
+        # Fallback to legacy latest
         with self._lock:
             return getattr(self, "_latest_point_cloud", None)
             
