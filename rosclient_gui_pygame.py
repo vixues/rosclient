@@ -2849,7 +2849,7 @@ class RosClientPygameGUI:
         """Setup UI components using new component system."""
         # Connection tab components - Multi-drone management
         self.drone_name_input = TextInput(200, 100, 200, 35, "Drone 1")
-        self.connection_url_input = TextInput(420, 100, 400, 35, "ws://localhost:9090")
+        self.connection_url_input = TextInput(420, 100, 400, 35, "ws://192.168.27.152:9090")
         self.use_mock_checkbox = Checkbox(200, 150, "Use Mock Client (Test Mode)", False)
         self.add_drone_btn = Button(200, 200, 120, 40, "Add Drone", self.add_drone)
         self.connect_btn = Button(330, 200, 120, 40, "Connect", self.connect)
@@ -2920,7 +2920,7 @@ class RosClientPygameGUI:
         self.image_update_interval = 0.033  # ~30 FPS for image updates
         
         # Network test components
-        self.test_url_input = TextInput(200, 100, 400, 35, "ws://localhost:9090")
+        self.test_url_input = TextInput(200, 100, 400, 35, "ws://192.168.27.152:9090")
         self.test_timeout_input = TextInput(200, 150, 100, 35, "5")
         self.test_results = []
         self.test_btn = Button(200, 200, 150, 40, "Test Connection", self.test_connection)

@@ -202,6 +202,7 @@ class RosClient(RosClientBase):
 
     def update_camera(self, msg: Dict[str, Any]) -> None:
         """Receive camera image messages and convert to OpenCV format."""
+        self.log.info("Received camera message", extra={"msg": msg})
         try:
             frame = None
             # CompressedImage: typically has 'data' with base64 or raw bytes
