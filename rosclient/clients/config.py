@@ -10,8 +10,8 @@ DEFAULT_TOPICS = {
     "control": RosTopic(name="/control", type="controller_msgs/cmd"),
     "drone_state": RosTopic(name="/mavros/drone_state", type="controller_msgs/DroneState"),
     "goal": RosTopic(name="/goal_user2brig", type="quadrotor_msgs/GoalSet"),
-    "camera": RosTopic(name="/drone_1/usb_cam/image_raw/compressed", type="sensor_msgs/CompressedImage"),
-    "point_cloud": RosTopic(name="/drone_1_cloud_registered", type="sensor_msgs/PointCloud2"),
+    "camera": RosTopic(name="/drone_2/usb_cam/image_raw", type="sensor_msgs/CompressedImage"),
+    "point_cloud": RosTopic(name="/drone_2_cloud_registered", type="sensor_msgs/PointCloud2"),
 }
 
 # Default configuration
