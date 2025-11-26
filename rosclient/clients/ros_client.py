@@ -168,7 +168,9 @@ class RosClient(RosClientBase):
             self._ts_mgr.topic(DEFAULT_TOPICS["gps"].name, DEFAULT_TOPICS["gps"].type).subscribe(self.update_gps)
             self._ts_mgr.topic(DEFAULT_TOPICS["odom"].name, DEFAULT_TOPICS["odom"].type).subscribe(self.update_odom)
             self._ts_mgr.topic(DEFAULT_TOPICS["drone_state"].name, DEFAULT_TOPICS["drone_state"].type).subscribe(self.update_drone_state)
-            self._ts_mgr.topic(DEFAULT_TOPICS["camera"].name, DEFAULT_TOPICS["camera"].type).subscribe(self.update_camera)
+            cam_name = self._config.get("camera_topic", DEFAULT_TOPICS["camera"].name)
+            cam_type = self._config.get("camera_type", DEFAULT_TOPICS["camera"].type)
+            self._ts_mgr.topic(cam_name, cam_type).subscribe(self.update_camera)
             self._ts_mgr.topic(DEFAULT_TOPICS["point_cloud"].name, DEFAULT_TOPICS["point_cloud"].type).subscribe(self.update_point_cloud)
         except Exception as e:
             self.log.exception(f"Failed to subscribe topics: {e}")
@@ -202,15 +204,24 @@ class RosClient(RosClientBase):
 
     def update_camera(self, msg: Dict[str, Any]) -> None:
         """Receive camera image messages and convert to OpenCV format."""
-        self.log.info("Received camera message", extra={"msg": msg})
+        try:
+            # Log a concise summary to avoid huge logs while providing useful info
+            data_len = None
+            if isinstance(msg.get("data"), (bytes, bytearray, str)):
+                data_len = len(msg.get("data"))
+            self.log.info("Received camera message", extra={"keys": list(msg.keys()), "data_len": data_len})
+        except Exception:
+            self.log.info("Received camera message (unable to summarize payload)")
         try:
             frame = None
             # CompressedImage: typically has 'data' with base64 or raw bytes
             if "data" in msg and isinstance(msg["data"], (bytes, bytearray)):
+                self.log.debug("Camera payload: raw bytes")
                 np_arr = np.frombuffer(msg["data"], np.uint8)
                 frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
             elif "data" in msg and isinstance(msg["data"], str):
-                img_data = base64.b64decode(msg["data"])
+                self.log.debug("Camera payload: base64 string (will decode)")
+                img_data = base64.b64decode(msg["data"]) if msg["data"] else b""
                 np_arr = np.frombuffer(img_data, np.uint8)
                 frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
             elif "encoding" in msg and "data" in msg:
@@ -228,7 +239,7 @@ class RosClient(RosClientBase):
                 return
 
             if frame is None:
-                self.log.warning("Failed to decode camera frame")
+                self.log.warning("Failed to decode camera frame (cv2.imdecode returned None)")
                 return
 
             timestamp = time.time()
@@ -265,20 +276,24 @@ class RosClient(RosClientBase):
                 if not self.is_connected():
                     self.log.warning("Cannot fetch image — not connected to ROS.")
                     return None
-                topic = self._ts_mgr.topic(DEFAULT_TOPICS["camera"].name, DEFAULT_TOPICS["camera"].type)
+                cam_name = self._config.get("camera_topic", DEFAULT_TOPICS["camera"].name)
+                cam_type = self._config.get("camera_type", DEFAULT_TOPICS["camera"].type)
+                topic = self._ts_mgr.topic(cam_name, cam_type)
 
             msg = topic.get_message(timeout=3.0)
             if not msg:
                 self.log.warning("No image message received from ROS.")
                 return None
 
-            # decode as in update_camera
+            # decode as in update_camera (more verbose logging for diagnostics)
             frame = None
             if "data" in msg and isinstance(msg["data"], (bytes, bytearray)):
+                self.log.debug("fetch_camera_image: raw bytes payload")
                 np_arr = np.frombuffer(msg["data"], np.uint8)
                 frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
             elif "data" in msg and isinstance(msg["data"], str):
-                img_data = base64.b64decode(msg["data"])
+                self.log.debug("fetch_camera_image: base64 payload (decoding)")
+                img_data = base64.b64decode(msg["data"]) if msg["data"] else b""
                 np_arr = np.frombuffer(img_data, np.uint8)
                 frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
             elif "encoding" in msg and "data" in msg:

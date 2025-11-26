@@ -25,3 +25,7 @@ DEFAULT_CONFIG = {
     "logger_level": 20,  # logging.INFO
 }
 
+# Allow overriding camera topic/type via config for environments using compressed topics
+DEFAULT_CONFIG.setdefault("camera_topic", DEFAULT_TOPICS["camera"].name)
+DEFAULT_CONFIG.setdefault("camera_type", DEFAULT_TOPICS["camera"].type)
+
