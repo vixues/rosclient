@@ -219,7 +219,7 @@ class RosClient(RosClientBase):
             if "data" in msg and isinstance(msg["data"], (bytes, bytearray)):
                 self.log.info(f"Camera payload branch: raw bytes, size={len(msg['data'])} bytes")
                 np_arr = np.frombuffer(msg["data"], np.uint8)
-                self.log.debug(f"Numpy array shape: {np_arr.shape}")
+                self.log.info(f"Numpy array shape: {np_arr.shape}")
                 frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
                 if frame is not None:
                     self.log.info(f"Successfully decoded frame: shape={frame.shape}, dtype={frame.dtype}")
@@ -228,24 +228,58 @@ class RosClient(RosClientBase):
             elif "data" in msg and isinstance(msg["data"], str):
                 self.log.info(f"Camera payload branch: base64 string, encoded_size={len(msg['data'])} chars")
                 try:
+                    # Step 1: Base64 decode
+                    self.log.info(f"Step 1: Starting base64 decode from {len(msg['data'])} characters")
                     img_data = base64.b64decode(msg["data"]) if msg["data"] else b""
-                    self.log.debug(f"Base64 decoded to {len(img_data)} bytes")
-                    self.log.debug(f"Base64 payload first 100 bytes (hex): {img_data[:100].hex()}")
-                    np_arr = np.frombuffer(img_data, np.uint8)
-                    self.log.debug(f"Numpy array shape: {np_arr.shape}, dtype: {np_arr.dtype}, min={np_arr.min()}, max={np_arr.max()}")
-                    frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
-                    if frame is not None:
-                        self.log.info(f"Successfully decoded frame: shape={frame.shape}, dtype={frame.dtype}")
+                    self.log.info(f"Step 1 result: Base64 decoded successfully to {len(img_data)} bytes")
+                    
+                    # Step 2: Analyze payload signature
+                    self.log.info(f"Step 2: Analyzing payload signature (first 20 bytes)")
+                    hex_sig = img_data[:20].hex()
+                    self.log.info(f"Step 2 result: Payload signature (hex): {hex_sig}")
+                    
+                    # Detect format from magic bytes
+                    if img_data.startswith(b'\xff\xd8\xff'):
+                        format_detected = "JPEG"
+                    elif img_data.startswith(b'\x89PNG'):
+                        format_detected = "PNG"
+                    elif img_data.startswith(b'BM'):
+                        format_detected = "BMP"
+                    elif img_data.startswith(b'GIF'):
+                        format_detected = "GIF"
+                    elif img_data.startswith(b'RIFF') and img_data[8:12] == b'WEBP':
+                        format_detected = "WebP"
                     else:
-                        self.log.warning(f"cv2.imdecode returned None for base64 payload (decoded_size={len(img_data)}, array_size={np_arr.size})")
-                        self.log.warning(f"Trying alternative decode with cv2.IMREAD_UNCHANGED...")
+                        format_detected = "UNKNOWN"
+                    self.log.info(f"Step 2 detail: Detected format from magic bytes: {format_detected}")
+                    
+                    # Step 3: Convert to numpy array
+                    self.log.debug(f"Step 3: Converting decoded bytes to numpy array (uint8)")
+                    np_arr = np.frombuffer(img_data, np.uint8)
+                    self.log.info(f"Step 3 result: Numpy array created - shape={np_arr.shape}, dtype={np_arr.dtype}, size={np_arr.size} bytes")
+                    self.log.debug(f"Step 3 detail: Array stats - min={np_arr.min()}, max={np_arr.max()}, mean={np_arr.mean():.2f}")
+                    
+                    # Step 4: Decode with cv2
+                    self.log.debug(f"Step 4: Attempting cv2.imdecode with IMREAD_COLOR flag")
+                    frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+                    
+                    if frame is not None:
+                        self.log.info(f"Step 4 result: SUCCESSFUL - cv2.imdecode(IMREAD_COLOR) decoded frame")
+                        self.log.info(f"Step 4 detail: Frame shape={frame.shape}, dtype={frame.dtype}, size={frame.nbytes} bytes")
+                    else:
+                        self.log.warning(f"Step 4 result: FAILED - cv2.imdecode(IMREAD_COLOR) returned None")
+                        self.log.warning(f"Step 4 detail: decoded_size={len(img_data)}, array_size={np_arr.size}, format={format_detected}")
+                        self.log.info(f"Step 4 retry: Attempting cv2.imdecode with IMREAD_UNCHANGED flag")
+                        
                         frame = cv2.imdecode(np_arr, cv2.IMREAD_UNCHANGED)
                         if frame is not None:
-                            self.log.info(f"Alternative decode succeeded: shape={frame.shape}, dtype={frame.dtype}")
+                            self.log.info(f"Step 4 retry result: SUCCESSFUL - cv2.imdecode(IMREAD_UNCHANGED) decoded frame")
+                            self.log.info(f"Step 4 retry detail: Frame shape={frame.shape}, dtype={frame.dtype}, size={frame.nbytes} bytes")
                         else:
-                            self.log.error(f"All decode attempts failed. Payload appears corrupted or in unsupported format")
+                            self.log.error(f"Step 4 retry result: FAILED - All decode attempts returned None")
+                            self.log.error(f"Step 4 analysis: Payload appears corrupted, truncated, or in unsupported format (detected: {format_detected})")
                 except Exception as b64_err:
-                    self.log.error(f"Base64 decode error: {b64_err}")
+                    self.log.error(f"Base64 decoding exception: {type(b64_err).__name__}: {b64_err}", exc_info=True)
             elif "encoding" in msg and "data" in msg:
                 height = int(msg.get("height", 0))
                 width = int(msg.get("width", 0))
@@ -255,7 +289,7 @@ class RosClient(RosClientBase):
                 img_data = np.frombuffer(msg["data"], dtype=np.uint8)
                 expected_size = height * width * channels
                 actual_size = img_data.size
-                self.log.debug(f"Buffer size check: expected={expected_size}, actual={actual_size}")
+                self.log.info(f"Buffer size check: expected={expected_size}, actual={actual_size}")
                 if height > 0 and width > 0 and actual_size == expected_size:
                     frame = img_data.reshape((height, width, channels))
                     self.log.info(f"Successfully reshaped frame: shape={frame.shape}, dtype={frame.dtype}")
@@ -323,17 +357,38 @@ class RosClient(RosClientBase):
             elif "data" in msg and isinstance(msg["data"], str):
                 self.log.debug("fetch_camera_image: base64 payload (decoding)")
                 try:
+                    # Step 1: Base64 decode
+                    self.log.debug(f"fetch_camera_image Step 1: Base64 decode from {len(msg['data'])} chars")
                     img_data = base64.b64decode(msg["data"]) if msg["data"] else b""
-                    self.log.debug(f"Base64 decoded to {len(img_data)} bytes")
-                    self.log.debug(f"Payload preview (first 100 bytes hex): {img_data[:100].hex()}")
+                    self.log.debug(f"fetch_camera_image Step 1: Decoded to {len(img_data)} bytes")
+                    
+                    # Step 2: Signature analysis
+                    self.log.debug(f"fetch_camera_image Step 2: Payload signature (hex): {img_data[:20].hex()}")
+                    if img_data.startswith(b'\xff\xd8\xff'):
+                        fmt = "JPEG"
+                    elif img_data.startswith(b'\x89PNG'):
+                        fmt = "PNG"
+                    else:
+                        fmt = "OTHER"
+                    self.log.debug(f"fetch_camera_image Step 2: Detected format: {fmt}")
+                    
+                    # Step 3: Convert to numpy array
                     np_arr = np.frombuffer(img_data, np.uint8)
-                    self.log.debug(f"Numpy array: shape={np_arr.shape}, min={np_arr.min()}, max={np_arr.max()}")
+                    self.log.debug(f"fetch_camera_image Step 3: Numpy array shape={np_arr.shape}, min={np_arr.min()}, max={np_arr.max()}")
+                    
+                    # Step 4: Decode with cv2
+                    self.log.debug(f"fetch_camera_image Step 4: Attempting cv2.imdecode(IMREAD_COLOR)")
                     frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
                     if frame is None:
-                        self.log.warning(f"cv2.imdecode(IMREAD_COLOR) returned None, trying IMREAD_UNCHANGED...")
+                        self.log.warning(f"fetch_camera_image Step 4: IMREAD_COLOR failed, trying IMREAD_UNCHANGED")
                         frame = cv2.imdecode(np_arr, cv2.IMREAD_UNCHANGED)
+                    
+                    if frame is not None:
+                        self.log.debug(f"fetch_camera_image Step 4: SUCCESS - frame shape={frame.shape}, dtype={frame.dtype}")
+                    else:
+                        self.log.error(f"fetch_camera_image Step 4: FAILED - both decode flags returned None (format: {fmt})")
                 except Exception as e:
-                    self.log.error(f"Base64 decode error in fetch_camera_image: {e}", exc_info=True)
+                    self.log.error(f"fetch_camera_image base64 error: {type(e).__name__}: {e}", exc_info=True)
                     return None
             elif "encoding" in msg and "data" in msg:
                 h = int(msg.get("height", 0))
