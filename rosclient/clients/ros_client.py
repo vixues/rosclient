@@ -189,6 +189,10 @@ class RosClient(RosClientBase):
                 self._state.armed = bool(msg.get("armed", self._state.armed))
                 self._state.mode = str(msg.get("mode", self._state.mode))
                 self._state.last_updated = time.time()
+            
+            # Record state if recording is enabled
+            if self._recorder and self._recorder.is_recording():
+                self._recorder.record_state(self._state, time.time())
         except Exception as e:
             self.log.error(f"Error handling state update: {e}")
 
@@ -201,6 +205,10 @@ class RosClient(RosClientBase):
                 self._state.reached = bool(msg.get("reached", self._state.reached))
                 self._state.tookoff = bool(msg.get("tookoff", self._state.tookoff))
                 self._state.last_updated = time.time()
+            
+            # Record state if recording is enabled
+            if self._recorder and self._recorder.is_recording():
+                self._recorder.record_state(self._state, time.time())
         except Exception as e:
             self.log.error(f"Error handling drone state update: {e}")
 
@@ -214,6 +222,10 @@ class RosClient(RosClientBase):
                 return
             
             frame, timestamp = result
+            
+            # Record image if recording is enabled
+            if self._recorder and self._recorder.is_recording():
+                self._recorder.record_image(frame, timestamp)
             
             # Update cache (non-blocking, drop old frames if queue is full)
             try:
@@ -330,6 +342,10 @@ class RosClient(RosClientBase):
             if result:
                 points, ts = result
                 
+                # Record point cloud if recording is enabled
+                if self._recorder and self._recorder.is_recording():
+                    self._recorder.record_pointcloud(points, ts)
+                
                 # Update cache (non-blocking, drop old frames if queue is full)
                 try:
                     self._pointcloud_cache.put_nowait((points, ts))
@@ -400,6 +416,10 @@ class RosClient(RosClientBase):
                 except Exception:
                     self.log.debug("Unable to parse battery percentage; leaving previous value")
                 self._state.last_updated = time.time()
+            
+            # Record state if recording is enabled
+            if self._recorder and self._recorder.is_recording():
+                self._recorder.record_state(self._state, time.time())
         except Exception as e:
             self.log.error(f"Error handling battery update: {e}")
 
@@ -414,6 +434,10 @@ class RosClient(RosClientBase):
                 except Exception:
                     self.log.debug("Partial or invalid GPS data received")
                 self._state.last_updated = time.time()
+            
+            # Record state if recording is enabled
+            if self._recorder and self._recorder.is_recording():
+                self._recorder.record_state(self._state, time.time())
         except Exception as e:
             self.log.error(f"Error handling GPS update: {e}")
 

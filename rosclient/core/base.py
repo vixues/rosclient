@@ -10,6 +10,7 @@ from typing import Optional, Dict, Any
 from ..models.drone import DroneState
 from ..models.state import ConnectionState
 from ..utils.logger import setup_logger
+from .recorder import Recorder
 
 
 class RosClientBase(ABC):
@@ -32,6 +33,10 @@ class RosClientBase(ABC):
         self._connect_lock = threading.Lock()
         self._connecting = False
         self.log = setup_logger(self.__class__.__name__)
+        
+        # Recording support
+        self._recorder: Optional[Recorder] = None
+        self._recording_config = self._config.get("recording", {})
 
     def is_connected(self) -> bool:
         """
@@ -133,6 +138,116 @@ class RosClientBase(ABC):
                     self.log.debug("Partial or invalid odometry position data; skipping position update")
 
                 self._state.last_updated = time.time()
+            self.log.debug(f"Odometry updated: roll={roll_deg:.3f}, pitch={pitch_deg:.3f}, yaw={yaw_deg:.3f}")
+            
+            # Record state if recording is enabled
+            if self._recorder and self._recorder.is_recording():
+                self._recorder.record_state(self._state, time.time())
         except Exception as e:
-            self.log.error(f"Error handling odometry update: {e}")
+            self.log.exception(f"Error handling odometry update: {e}")
+    
+    # ---------- Recording methods ----------
+    
+    def start_recording(
+        self,
+        record_images: bool = True,
+        record_pointclouds: bool = True,
+        record_states: bool = True,
+        image_quality: int = 85,
+        **kwargs
+    ) -> bool:
+        """
+        Start recording data from the client.
+        
+        Args:
+            record_images: Whether to record images
+            record_pointclouds: Whether to record point clouds
+            record_states: Whether to record states
+            image_quality: JPEG quality (1-100) for image compression
+            **kwargs: Additional recorder configuration
+            
+        Returns:
+            True if recording started successfully
+        """
+        try:
+            if self._recorder and self._recorder.is_recording():
+                self.log.warning("Recording already in progress")
+                return False
+            
+            # Create recorder if needed
+            if self._recorder is None:
+                self._recorder = Recorder(
+                    record_images=record_images,
+                    record_pointclouds=record_pointclouds,
+                    record_states=record_states,
+                    image_quality=image_quality,
+                    max_queue_size=self._recording_config.get("max_queue_size", 100),
+                    batch_size=self._recording_config.get("batch_size", 10),
+                    logger=self.log
+                )
+            
+            # Start recording
+            self._recorder.start_recording(
+                client_type=self.__class__.__name__,
+                connection_str=self.connection_str,
+                config=self._config
+            )
+            
+            self.log.info("Recording started")
+            return True
+        except Exception as e:
+            self.log.error(f"Failed to start recording: {e}")
+            return False
+    
+    def stop_recording(self) -> bool:
+        """
+        Stop recording.
+        
+        Returns:
+            True if recording stopped successfully
+        """
+        try:
+            if self._recorder and self._recorder.is_recording():
+                self._recorder.stop_recording()
+                self.log.info("Recording stopped")
+                return True
+            return False
+        except Exception as e:
+            self.log.error(f"Failed to stop recording: {e}")
+            return False
+    
+    def save_recording(self, file_path: str, compress: bool = True) -> bool:
+        """
+        Save recorded data to file.
+        
+        Args:
+            file_path: Path to save file
+            compress: Whether to compress the file
+            
+        Returns:
+            True if saved successfully
+        """
+        try:
+            if not self._recorder:
+                self.log.error("No recorder available")
+                return False
+            
+            return self._recorder.save(file_path, compress=compress)
+        except Exception as e:
+            self.log.error(f"Failed to save recording: {e}")
+            return False
+    
+    def is_recording(self) -> bool:
+        """Check if currently recording."""
+        return self._recorder is not None and self._recorder.is_recording()
+    
+    def get_recorder(self) -> Optional[Recorder]:
+        """Get the recorder instance."""
+        return self._recorder
+    
+    def get_recording_statistics(self) -> Optional[Dict[str, Any]]:
+        """Get recording statistics."""
+        if self._recorder:
+            return self._recorder.get_statistics()
+        return None
 

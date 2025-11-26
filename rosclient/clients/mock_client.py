@@ -481,13 +481,23 @@ class MockRosClient(RosClientBase):
                 except queue.Empty:
                     break
             if latest:
+                # Record image if recording is enabled
+                if self._recorder and self._recorder.is_recording():
+                    img, ts = latest
+                    if HAS_NUMPY and img is not None:
+                        self._recorder.record_image(img, ts)
                 return latest
         except Exception:
             pass
         
         # Fallback to legacy latest
         with self._lock:
-            return getattr(self, "_latest_image", None)
+            latest = getattr(self, "_latest_image", None)
+            if latest and self._recorder and self._recorder.is_recording():
+                img, ts = latest
+                if HAS_NUMPY and img is not None:
+                    self._recorder.record_image(img, ts)
+            return latest
             
     def get_latest_point_cloud(self) -> Optional[Tuple]:
         """
@@ -506,13 +516,23 @@ class MockRosClient(RosClientBase):
                 except queue.Empty:
                     break
             if latest:
+                # Record point cloud if recording is enabled
+                if self._recorder and self._recorder.is_recording():
+                    points, ts = latest
+                    if HAS_NUMPY and points is not None:
+                        self._recorder.record_pointcloud(points, ts)
                 return latest
         except Exception:
             pass
         
         # Fallback to legacy latest
         with self._lock:
-            return getattr(self, "_latest_point_cloud", None)
+            latest = getattr(self, "_latest_point_cloud", None)
+            if latest and self._recorder and self._recorder.is_recording():
+                points, ts = latest
+                if HAS_NUMPY and points is not None:
+                    self._recorder.record_pointcloud(points, ts)
+            return latest
             
     def fetch_camera_image(self) -> Optional[Tuple]:
         """
