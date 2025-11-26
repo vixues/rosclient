@@ -232,12 +232,12 @@ class RosClient(RosClientBase):
                     self.log.info(f"Step 1: Starting base64 decode from {len(msg['data'])} characters")
                     img_data = base64.b64decode(msg["data"]) if msg["data"] else b""
                     self.log.info(f"Step 1 result: Base64 decoded successfully to {len(img_data)} bytes")
-                    
+
                     # Step 2: Analyze payload signature
                     self.log.info(f"Step 2: Analyzing payload signature (first 20 bytes)")
                     hex_sig = img_data[:20].hex()
                     self.log.info(f"Step 2 result: Payload signature (hex): {hex_sig}")
-                    
+
                     # Detect format from magic bytes
                     if img_data.startswith(b'\xff\xd8\xff'):
                         format_detected = "JPEG"
@@ -250,36 +250,46 @@ class RosClient(RosClientBase):
                     elif img_data.startswith(b'RIFF') and img_data[8:12] == b'WEBP':
                         format_detected = "WebP"
                     else:
-                        format_detected = "UNKNOWN"
+                        format_detected = "RAW"
                     self.log.info(f"Step 2 detail: Detected format from magic bytes: {format_detected}")
-                    
+
                     # Step 3: Convert to numpy array
-                    self.log.debug(f"Step 3: Converting decoded bytes to numpy array (uint8)")
-                    np_arr = np.frombuffer(img_data, np.uint8)
+                    self.log.info(f"Step 3: Converting decoded bytes to numpy array (uint8)")
+                    np_arr = np.frombuffer(img_data, dtype=np.uint8)
                     self.log.info(f"Step 3 result: Numpy array created - shape={np_arr.shape}, dtype={np_arr.dtype}, size={np_arr.size} bytes")
-                    self.log.debug(f"Step 3 detail: Array stats - min={np_arr.min()}, max={np_arr.max()}, mean={np_arr.mean():.2f}")
-                    
-                    # Step 4: Decode with cv2
-                    self.log.debug(f"Step 4: Attempting cv2.imdecode with IMREAD_COLOR flag")
-                    frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
-                    
-                    if frame is not None:
-                        self.log.info(f"Step 4 result: SUCCESSFUL - cv2.imdecode(IMREAD_COLOR) decoded frame")
-                        self.log.info(f"Step 4 detail: Frame shape={frame.shape}, dtype={frame.dtype}, size={frame.nbytes} bytes")
+
+                    # Step 4: Attempt cv2.imdecode if it's compressed
+                    frame = None
+                    if format_detected in ["JPEG", "PNG", "BMP", "GIF", "WebP"]:
+                        self.log.info(f"Step 4: Attempting cv2.imdecode with IMREAD_COLOR flag")
+                        frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+
+                    # Step 5: If imdecode failed or RAW format, try manual reshape
+                    if frame is None:
+                        self.log.warning(f"Step 4 result: cv2.imdecode returned None, attempting manual reshape")
+                        try:
+                            # 需要知道 width, height, channels
+                            width = msg.get("width")
+                            height = msg.get("height")
+                            encoding = msg.get("encoding", "bgr8")
+                            channels = 3 if encoding in ["bgr8", "rgb8"] else 1
+
+                            if width and height:
+                                frame = np_arr.reshape((height, width, channels))
+                                if encoding == "rgb8":
+                                    frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+                                self.log.info(f"Step 5 result: Successfully reshaped raw data to frame")
+                                self.log.info(f"Frame shape={frame.shape}, dtype={frame.dtype}, size={frame.nbytes} bytes")
+                            else:
+                                self.log.error(f"Cannot reshape raw data: missing width/height info")
+                        except Exception as reshape_err:
+                            self.log.error(f"Manual reshape failed: {type(reshape_err).__name__}: {reshape_err}", exc_info=True)
                     else:
-                        self.log.warning(f"Step 4 result: FAILED - cv2.imdecode(IMREAD_COLOR) returned None")
-                        self.log.warning(f"Step 4 detail: decoded_size={len(img_data)}, array_size={np_arr.size}, format={format_detected}")
-                        self.log.info(f"Step 4 retry: Attempting cv2.imdecode with IMREAD_UNCHANGED flag")
-                        
-                        frame = cv2.imdecode(np_arr, cv2.IMREAD_UNCHANGED)
-                        if frame is not None:
-                            self.log.info(f"Step 4 retry result: SUCCESSFUL - cv2.imdecode(IMREAD_UNCHANGED) decoded frame")
-                            self.log.info(f"Step 4 retry detail: Frame shape={frame.shape}, dtype={frame.dtype}, size={frame.nbytes} bytes")
-                        else:
-                            self.log.error(f"Step 4 retry result: FAILED - All decode attempts returned None")
-                            self.log.error(f"Step 4 analysis: Payload appears corrupted, truncated, or in unsupported format (detected: {format_detected})")
+                        self.log.info(f"Step 4 result: cv2.imdecode successful, frame ready")
+                
                 except Exception as b64_err:
                     self.log.error(f"Base64 decoding exception: {type(b64_err).__name__}: {b64_err}", exc_info=True)
+
             elif "encoding" in msg and "data" in msg:
                 height = int(msg.get("height", 0))
                 width = int(msg.get("width", 0))
