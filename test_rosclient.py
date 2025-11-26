@@ -101,7 +101,7 @@ for v in range(1, 4):
 # -----------------------------
 # 获取相机画面
 # -----------------------------
-frame_data = client.fetch_camera_image()
+frame_data = client.get_latest_image()
 
 if frame_data:
     frame, ts = frame_data
@@ -118,7 +118,7 @@ else:
 # -----------------------------
 # 获取点云并可视化（最多显示 5000 个点）
 # -----------------------------
-cloud_data = client.fetch_point_cloud()
+cloud_data = client.get_latest_point_cloud()
 
 if cloud_data:
     points, ts = cloud_data

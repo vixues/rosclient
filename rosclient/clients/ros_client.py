@@ -318,7 +318,7 @@ class RosClient(RosClientBase):
             # Update cache (non-blocking, drop old frames if queue is full)
             try:
                 self._image_cache.put_nowait((frame, timestamp))
-                self.log.debug(f"Added frame to cache at {timestamp:.3f}s")
+                self.log.info(f"Added frame to cache at {timestamp:.3f}s")
             except queue.Full:
                 # Queue is full, remove oldest and add new
                 try:
