@@ -1,26 +1,30 @@
 import json
-import logging
 import time
+import logging
 import cv2
-from typing import Any, Dict
+import numpy as np
+import matplotlib.pyplot as plt
+
 from rosclient import RosClient, MockRosClient
 
-
-# --------------------------------------------------------
-# Logging Configuration
-# --------------------------------------------------------
+# -----------------------------
+# Logging 配置
+# -----------------------------
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - [%(name)s] - %(message)s"
 )
-logger = logging.getLogger("ROSBridgeTest")
+logger = logging.getLogger("ROSBridgeDemo")
 
 
-# --------------------------------------------------------
-# Utility Function: Retrieve Drone Status
-# --------------------------------------------------------
-def get_device_status(client: RosClient, device_id: str, connection_url: str) -> Dict[str, Any]:
-    """Extract and return key status information from the drone via RosClient."""
+# -----------------------------
+# 获取设备状态封装函数
+# -----------------------------
+def get_device_status(client, device_id: str, connection_url: str):
+    """
+    从 ROS 客户端中读取无人机状态并格式化为字典结构。
+    捕获异常以防止连接失败导致程序中断。
+    """
     try:
         state = client.get_status()
         pos = client.get_position()
@@ -41,154 +45,100 @@ def get_device_status(client: RosClient, device_id: str, connection_url: str) ->
             "returned": state.returned,
             "last_update": time.strftime("%H:%M:%S", time.localtime(state.last_updated))
         }
+
     except Exception as e:
         logger.error(f"Failed to retrieve device status: {e}")
         return {"error": str(e)}
 
 
-def test_connection(client: RosClient, connection_url: str) -> bool:
-    """Check ROSBridge connection status with retry."""
-    logger.info("Testing ROSBridge connection...")
+# -----------------------------
+# 连接基础配置
+# -----------------------------
+connection_url = "ws://192.168.27.152:9090"
+device_id = "drone1"
 
-    try:
-        if hasattr(client, "is_connected") and callable(client.is_connected):
-            connected = client.is_connected()
-        else:
-            connected = getattr(client, "connected", False)
+# 初始化 ROS 客户端
+# client = MockRosClient(connection_url)
+client = RosClient(connection_url)
+# 连接客户端
+client.connect_async()
 
-        if connected:
-            logger.info("ROSBridge connected successfully.")
-            return True
-    except Exception as e:
-        logger.warning(f"Connection check failed: {e}")
+logger.info("Connecting to ROSBridge...")
 
-    time.sleep(5)
-    logger.error(f"Unable to connect to ROSBridge: {connection_url}")
-    return False
+# -----------------------------
+# 测试连接状态
+# -----------------------------
+is_conn = client.is_connected() if hasattr(client, "is_connected") else client.connected
+logger.info(f"Connected: {is_conn}")
 
+# -----------------------------
+# 获取并打印无人机当前状态
+# -----------------------------
+status = get_device_status(client, device_id, connection_url)
+logger.info(json.dumps(status, indent=2, ensure_ascii=False))
 
-def test_device_status(client: RosClient, device_id: str, connection_url: str):
-    logger.info("Testing device status retrieval...")
-    status = get_device_status(client, device_id, connection_url)
-    logger.info(json.dumps(status, indent=2, ensure_ascii=False))
-    return status
+# -----------------------------
+# 发布控制指令测试
+# -----------------------------
+control_topic = client._config.get("control_topic", "/control")
+control_type = client._config.get("control_type", "controller_msgs/cmd")
 
+for v in range(1, 4):
+    # 发布控制命令
+    client.publish(control_topic, control_type, {"cmd": v})
 
-def test_control_publish(client: RosClient):
-    logger.info("Testing control topic publishing...")
+    # 发布目标点
+    client.publish(
+        "/goal_user2brig",
+        "quadrotor_msgs/GoalSet",
+        {"drone_id": v, "goal": [v, v * 10, v * 100]},
+    )
 
-    control_topic = client._config.get("control_topic", "/control")
-    control_type = client._config.get("control_type", "controller_msgs/cmd")
-
-    for val in range(1, 4):
-        try:
-            client.publish(control_topic, control_type, {"cmd": val})
-            client.publish(
-                '/goal_user2brig',
-                "quadrotor_msgs/GoalSet",
-                {'drone_id': int(val), 'goal': [val, val * 10, val * 100]}
-            )
-            logger.info(f"Successfully published control command: {val}")
-        except Exception as e:
-            logger.error(f"Failed to publish control command {val}: {e}")
-        time.sleep(1)
-
-
-def test_status_updates(client: RosClient, device_id: str, connection_url: str):
-    logger.info("Starting periodic status update test...")
-    for i in range(3):
-        time.sleep(2)
-        status = get_device_status(client, device_id, connection_url)
-        logger.info(f"Status update [{i + 1}]: {json.dumps(status, indent=2, ensure_ascii=False)}")
+    logger.info(f"Published control command: {v}")
+    time.sleep(0.5)
 
 
-def test_camera_snapshot(client: RosClient):
-    logger.info("Testing instant camera frame capture...")
+# -----------------------------
+# 获取相机画面
+# -----------------------------
+frame_data = client.fetch_camera_image()
 
-    try:
-        frame_data = client.fetch_camera_image()
-        if frame_data:
-            frame, ts = frame_data
-            logger.info(f"Successfully retrieved camera frame, timestamp: {ts:.3f}")
-            cv2.imshow("Drone Camera Snapshot", frame)
-            cv2.waitKey(2000)
-            cv2.destroyAllWindows()
-        else:
-            logger.warning("No camera frame received")
-    except Exception as e:
-        logger.warning(f"Failed to fetch camera frame: {e}")
+if frame_data:
+    frame, ts = frame_data
+    logger.info(f"Image timestamp: {ts}")
 
-
-def test_point_cloud_snapshot(client: RosClient):
-    logger.info("Testing instant point cloud capture...")
-
-    try:
-        cloud_data = client.fetch_point_cloud()
-        if cloud_data:
-            points, ts = cloud_data
-            num_points = len(points)
-            logger.info(f"Retrieved point cloud: {num_points} points, timestamp: {ts:.3f}")
-
-            if num_points > 0:
-                import matplotlib.pyplot as plt
-                subset = points[:min(5000, num_points)]
-                fig = plt.figure("Drone Point Cloud Snapshot")
-                ax = fig.add_subplot(111, projection='3d')
-                ax.scatter(subset[:, 0], subset[:, 1], subset[:, 2], s=1)
-                ax.set_title(f"Drone Point Cloud Snapshot ({num_points} points)")
-                ax.set_xlabel("X")
-                ax.set_ylabel("Y")
-                ax.set_zlabel("Z")
-                plt.show(block=False)
-                plt.pause(3.0)
-                plt.close(fig)
-        else:
-            logger.warning("No point cloud data received")
-    except Exception as e:
-        logger.warning(f"Failed to fetch point cloud data: {e}")
+    # 使用 Matplotlib 显示图像（转换 BGR → RGB）
+    plt.imshow(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+    plt.title(f"Camera Frame (ts={ts:.3f})")
+    plt.axis("off")
+else:
+    logger.warning("No camera frame received")
 
 
-def test_disconnect(client: RosClient):
-    logger.info("Closing connection...")
-    client.terminate()
-    time.sleep(1)
-    logger.info("Connection closed safely")
+# -----------------------------
+# 获取点云并可视化（最多显示 5000 个点）
+# -----------------------------
+cloud_data = client.fetch_point_cloud()
+
+if cloud_data:
+    points, ts = cloud_data
+    num = len(points)
+    logger.info(f"Point cloud: {num} points")
+
+    if num > 0:
+        pts = points[:min(num, 5000)]
+
+        fig = plt.figure(figsize=(6, 6))
+        ax = fig.add_subplot(111, projection='3d')
+        ax.scatter(pts[:, 0], pts[:, 1], pts[:, 2], s=1)
+        ax.set_title(f"Point Cloud Snapshot ({num} points)")
+        plt.show()
+else:
+    logger.warning("No point cloud received")
 
 
-def main(Mock=False):
-    connection_url = "ws://192.168.27.152:9090"
-    device_id = "drone1"
-
-    if Mock:
-        client = MockRosClient(connection_url)
-    else:
-        try:
-            logger.info(f"Connecting to ROSBridge server at {connection_url} ...")
-            client = RosClient(connection_url)
-            logger.info("Connection initiated successfully.")
-        except Exception as e:
-            logger.error(f"Failed to start ROSBridge connection: {e}")
-            return
-
-    # Connection Test
-    connected = test_connection(client, connection_url)
-    if not connected:
-        logger.error("Could not establish a ROSBridge connection. Exiting tests.")
-        return
-
-    time.sleep(10)
-    test_device_status(client, device_id, connection_url)
-    test_control_publish(client)
-    test_status_updates(client, device_id, connection_url)
-    # test_camera_snapshot(client)
-    # test_point_cloud_snapshot(client)
-    test_disconnect(client)
-
-
-if __name__ == "__main__":
-    try:
-        main(Mock=True)
-    except KeyboardInterrupt:
-        logger.info("Program interrupted by user")
-    except Exception as e:
-        logger.exception(f"Unexpected error during testing: {e}")
+# -----------------------------
+# 结束连接
+# -----------------------------
+client.terminate()
+logger.info("Disconnected.")
