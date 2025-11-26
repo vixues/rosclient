@@ -204,14 +204,7 @@ class RosClient(RosClientBase):
 
     def update_camera(self, msg: Dict[str, Any]) -> None:
         """Receive camera image messages and convert to OpenCV format."""
-        try:
-            # Log a concise summary to avoid huge logs while providing useful info
-            data_len = None
-            if isinstance(msg.get("data"), (bytes, bytearray, str)):
-                data_len = len(msg.get("data"))
-            self.log.info("Received camera message", extra={"keys": list(msg.keys()), "data_len": data_len})
-        except Exception:
-            self.log.info("Received camera message (unable to summarize payload)")
+        self.log.info("Received camera message (unable to summarize payload)")
         try:
             frame = None
             # CompressedImage: typically has 'data' with base64 or raw bytes
