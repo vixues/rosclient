@@ -129,6 +129,11 @@ class RosClientGUITest:
         notebook.add(self.network_frame, text="Network Test")
         self.setup_network_tab()
         
+        # Recording tab
+        self.recording_frame = ttk.Frame(notebook)
+        notebook.add(self.recording_frame, text="Recording")
+        self.setup_recording_tab()
+        
     def setup_statusbar(self, parent):
         """Create status bar"""
         statusbar = ttk.Frame(parent)
@@ -197,8 +202,20 @@ class RosClientGUITest:
         mode_frame.pack(fill=tk.X, pady=8)
         self.use_mock = tk.BooleanVar(value=False)
         mock_check = ttk.Checkbutton(mode_frame, text="Use Mock Client (Test Mode)", 
-                       variable=self.use_mock)
+                       variable=self.use_mock, command=self.on_mock_mode_changed)
         mock_check.pack(side=tk.LEFT, padx=5)
+        
+        # Recording file for Mock Client
+        self.recording_file_frame = ttk.Frame(conn_group)
+        self.recording_file_frame.pack(fill=tk.X, pady=8)
+        ttk.Label(self.recording_file_frame, text="Recording File:").pack(side=tk.LEFT, padx=(0, 10))
+        self.recording_file_path = tk.StringVar()
+        recording_entry = ttk.Entry(self.recording_file_frame, textvariable=self.recording_file_path, 
+                                    width=35, state=tk.DISABLED)
+        recording_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+        ttk.Button(self.recording_file_frame, text="Browse...", 
+                  command=self.browse_recording_file, width=12).pack(side=tk.LEFT, padx=5)
+        self.recording_file_frame.pack_forget()  # Hide by default
         
         # Connection buttons
         btn_frame = ttk.Frame(conn_group)
@@ -539,6 +556,115 @@ class RosClientGUITest:
             bg='#f8f9fa', fg='#212529'
         )
         self.test_results.pack(fill=tk.BOTH, expand=True)
+    
+    def setup_recording_tab(self):
+        """Setup recording control tab."""
+        # Main container
+        main_pane = ttk.PanedWindow(self.recording_frame, orient=tk.VERTICAL)
+        main_pane.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        
+        # Recording control
+        control_group = ttk.LabelFrame(main_pane, text="Recording Control", padding=15)
+        main_pane.add(control_group, weight=0)
+        
+        # Start/Stop recording
+        record_btn_frame = ttk.Frame(control_group)
+        record_btn_frame.pack(fill=tk.X, pady=10)
+        
+        self.start_record_btn = ttk.Button(record_btn_frame, text="Start Recording", 
+                                          command=self.start_recording,
+                                          style='Success.TButton', width=15)
+        self.start_record_btn.pack(side=tk.LEFT, padx=5)
+        
+        self.stop_record_btn = ttk.Button(record_btn_frame, text="Stop Recording", 
+                                         command=self.stop_recording,
+                                         state=tk.DISABLED, width=15)
+        self.stop_record_btn.pack(side=tk.LEFT, padx=5)
+        
+        self.save_record_btn = ttk.Button(record_btn_frame, text="Save Recording", 
+                                         command=self.save_recording,
+                                         state=tk.DISABLED, width=15)
+        self.save_record_btn.pack(side=tk.LEFT, padx=5)
+        
+        # Recording options
+        options_frame = ttk.Frame(control_group)
+        options_frame.pack(fill=tk.X, pady=10)
+        
+        self.record_images = tk.BooleanVar(value=True)
+        ttk.Checkbutton(options_frame, text="Record Images", 
+                       variable=self.record_images).pack(side=tk.LEFT, padx=10)
+        
+        self.record_pointclouds = tk.BooleanVar(value=True)
+        ttk.Checkbutton(options_frame, text="Record Point Clouds", 
+                       variable=self.record_pointclouds).pack(side=tk.LEFT, padx=10)
+        
+        self.record_states = tk.BooleanVar(value=True)
+        ttk.Checkbutton(options_frame, text="Record States", 
+                       variable=self.record_states).pack(side=tk.LEFT, padx=10)
+        
+        # Recording statistics
+        stats_group = ttk.LabelFrame(main_pane, text="Recording Statistics", padding=10)
+        main_pane.add(stats_group, weight=1)
+        
+        self.recording_stats = scrolledtext.ScrolledText(
+            stats_group, height=15, width=80, wrap=tk.WORD,
+            bg='#f8f9fa', fg='#212529', state=tk.DISABLED
+        )
+        self.recording_stats.pack(fill=tk.BOTH, expand=True)
+        
+        # Playback control (for Mock Client)
+        playback_group = ttk.LabelFrame(main_pane, text="Playback Control (Mock Client Only)", padding=15)
+        main_pane.add(playback_group, weight=0)
+        
+        # Load recording file section
+        load_frame = ttk.Frame(playback_group)
+        load_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        ttk.Label(load_frame, text="Recording File:").pack(side=tk.LEFT, padx=(0, 5))
+        self.playback_file_path = tk.StringVar()
+        playback_entry = ttk.Entry(load_frame, textvariable=self.playback_file_path, 
+                                   width=40, state=tk.DISABLED)
+        playback_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+        
+        self.load_playback_btn = ttk.Button(load_frame, text="Load File", 
+                                           command=self.load_playback_file,
+                                           state=tk.DISABLED, width=12)
+        self.load_playback_btn.pack(side=tk.LEFT, padx=5)
+        
+        playback_btn_frame = ttk.Frame(playback_group)
+        playback_btn_frame.pack(fill=tk.X, pady=10)
+        
+        self.playback_play_btn = ttk.Button(playback_btn_frame, text="Play", 
+                                           command=self.playback_play,
+                                           state=tk.DISABLED, width=12)
+        self.playback_play_btn.pack(side=tk.LEFT, padx=5)
+        
+        self.playback_pause_btn = ttk.Button(playback_btn_frame, text="Pause", 
+                                            command=self.playback_pause,
+                                            state=tk.DISABLED, width=12)
+        self.playback_pause_btn.pack(side=tk.LEFT, padx=5)
+        
+        self.playback_stop_btn = ttk.Button(playback_btn_frame, text="Stop", 
+                                           command=self.playback_stop,
+                                            state=tk.DISABLED, width=12)
+        self.playback_stop_btn.pack(side=tk.LEFT, padx=5)
+        
+        # Playback info
+        playback_info_frame = ttk.Frame(playback_group)
+        playback_info_frame.pack(fill=tk.X, pady=5)
+        
+        ttk.Label(playback_info_frame, text="Progress:").pack(side=tk.LEFT, padx=5)
+        self.playback_progress_label = ttk.Label(playback_info_frame, text="0.0%", 
+                                                 foreground="#6c757d")
+        self.playback_progress_label.pack(side=tk.LEFT, padx=5)
+        
+        ttk.Label(playback_info_frame, text="Time:").pack(side=tk.LEFT, padx=(20, 5))
+        self.playback_time_label = ttk.Label(playback_info_frame, text="0.0s", 
+                                             foreground="#6c757d")
+        self.playback_time_label.pack(side=tk.LEFT, padx=5)
+        
+        # Update playback info periodically
+        self.update_playback_info()
         
     def setup_update_loop(self):
         """Setup periodic update loop."""
@@ -552,6 +678,9 @@ class RosClientGUITest:
                             self.root.after(0, self.update_image_display)
                         if self.auto_update_pc.get() and HAS_MATPLOTLIB:
                             self.root.after(0, self.update_pointcloud_display)
+                        # Update recording stats
+                        if hasattr(self, 'start_record_btn') and self.start_record_btn['state'] == tk.DISABLED:
+                            self.root.after(0, self.update_recording_stats)
                 except Exception as e:
                     self.log(f"Update error: {e}", "error")
                 time.sleep(1)  # Update every second
@@ -661,6 +790,24 @@ class RosClientGUITest:
             self.status_indicator_text.config(text="Disconnected", foreground='#dc3545')
             self.info_label.config(text="Disconnected")
     
+    def on_mock_mode_changed(self):
+        """Handle mock mode checkbox change."""
+        if self.use_mock.get():
+            self.recording_file_frame.pack(fill=tk.X, pady=8, before=self.connect_btn.master)
+        else:
+            self.recording_file_frame.pack_forget()
+    
+    def browse_recording_file(self):
+        """Browse for recording file."""
+        from tkinter import filedialog
+        filename = filedialog.askopenfilename(
+            title="Select Recording File",
+            filetypes=[("ROS Recording", "*.rosrec"), ("All files", "*.*")]
+        )
+        if filename:
+            self.recording_file_path.set(filename)
+            self.log(f"Selected recording file: {filename}", "info")
+    
     def connect(self):
         """Connect to ROS bridge."""
         url = self.connection_url.get().strip()
@@ -676,8 +823,22 @@ class RosClientGUITest:
             def connect_thread():
                 try:
                     if self.use_mock.get():
-                        self.client = MockRosClient(url)
-                        self.root.after(0, lambda: self.log("Using Mock client (Test Mode)", "warning"))
+                        # Prepare config for Mock Client
+                        config = {}
+                        recording_file = self.recording_file_path.get().strip()
+                        if recording_file:
+                            config["playback_file"] = recording_file
+                            config["playback_loop"] = True  # Auto loop when file is provided
+                            self.root.after(0, lambda: self.log(f"Using Mock client with recording: {recording_file}", "info"))
+                        else:
+                            self.root.after(0, lambda: self.log("Using Mock client (Test Mode)", "warning"))
+                        
+                        self.client = MockRosClient(url, config=config)
+                        self.client.connect_async()
+                        
+                        # Enable playback controls if in playback mode
+                        if recording_file and self.client.is_playback_mode():
+                            self.root.after(0, lambda: self.enable_playback_controls())
                     else:
                         self.client = RosClient(url)
                         self.client.connect_async()
@@ -691,6 +852,13 @@ class RosClientGUITest:
                         self.root.after(0, lambda: self.disconnect_btn.config(state=tk.NORMAL))
                         self.root.after(0, lambda: self.log("Connection successful!", "success"))
                         self.root.after(0, lambda: self.update_connection_indicator(True))
+                        
+                        # Enable playback controls if Mock Client
+                        if isinstance(self.client, MockRosClient):
+                            self.root.after(0, lambda: self.load_playback_btn.config(state=tk.NORMAL))
+                            if self.client.is_playback_mode():
+                                self.root.after(0, lambda: self.enable_playback_controls())
+                                self.root.after(0, lambda: self.playback_file_path.set(self.client._playback_file or ""))
                     else:
                         self.root.after(0, lambda: self.log("Connection failed, please check URL and network", "error"))
                         self.root.after(0, lambda: messagebox.showwarning("Warning", "Connection failed, please check URL and network"))
@@ -712,6 +880,10 @@ class RosClientGUITest:
     def disconnect(self):
         """Disconnect from ROS bridge."""
         try:
+            # Stop recording if active
+            if self.client and self.client.is_recording():
+                self.client.stop_recording()
+            
             if self.client:
                 self.client.terminate()
                 self.log("Disconnected", "info")
@@ -720,6 +892,16 @@ class RosClientGUITest:
             self.connect_btn.config(state=tk.NORMAL)
             self.disconnect_btn.config(state=tk.DISABLED)
             self.update_connection_indicator(False)
+            
+            # Disable recording controls
+            self.start_record_btn.config(state=tk.NORMAL)
+            self.stop_record_btn.config(state=tk.DISABLED)
+            self.save_record_btn.config(state=tk.DISABLED)
+            
+            # Disable playback controls
+            self.disable_playback_controls()
+            self.load_playback_btn.config(state=tk.DISABLED)
+            self.playback_file_path.set("")
             
             # Clear status display
             for label in self.status_labels.values():
@@ -1067,6 +1249,208 @@ class RosClientGUITest:
                 self.root.after(0, lambda: self.test_results.see(tk.END))
                 
         threading.Thread(target=run_full, daemon=True).start()
+    
+    # ---------- Recording control methods ----------
+    
+    def start_recording(self):
+        """Start recording."""
+        if not self.client or not self.is_connected:
+            messagebox.showwarning("Warning", "Please connect first")
+            return
+        
+        try:
+            success = self.client.start_recording(
+                record_images=self.record_images.get(),
+                record_pointclouds=self.record_pointclouds.get(),
+                record_states=self.record_states.get(),
+                image_quality=85
+            )
+            if success:
+                self.start_record_btn.config(state=tk.DISABLED)
+                self.stop_record_btn.config(state=tk.NORMAL)
+                self.save_record_btn.config(state=tk.DISABLED)
+                self.recording_stats.config(state=tk.NORMAL)
+                self.recording_stats.delete('1.0', tk.END)
+                self.recording_stats.insert('1.0', "Recording started...\n")
+                self.recording_stats.config(state=tk.DISABLED)
+                self.log("Recording started", "success")
+            else:
+                messagebox.showerror("Error", "Failed to start recording")
+        except Exception as e:
+            self.log(f"Start recording error: {e}", "error")
+            messagebox.showerror("Error", f"Failed to start recording: {e}")
+    
+    def stop_recording(self):
+        """Stop recording."""
+        if not self.client:
+            return
+        
+        try:
+            success = self.client.stop_recording()
+            if success:
+                self.start_record_btn.config(state=tk.NORMAL)
+                self.stop_record_btn.config(state=tk.DISABLED)
+                self.save_record_btn.config(state=tk.NORMAL)
+                self.log("Recording stopped", "info")
+                self.update_recording_stats()
+            else:
+                messagebox.showwarning("Warning", "No active recording to stop")
+        except Exception as e:
+            self.log(f"Stop recording error: {e}", "error")
+            messagebox.showerror("Error", f"Failed to stop recording: {e}")
+    
+    def save_recording(self):
+        """Save recording to file."""
+        if not self.client:
+            messagebox.showwarning("Warning", "No client available")
+            return
+        
+        try:
+            from tkinter import filedialog
+            filename = filedialog.asksaveasfilename(
+                title="Save Recording",
+                defaultextension=".rosrec",
+                filetypes=[("ROS Recording", "*.rosrec"), ("All files", "*.*")]
+            )
+            if filename:
+                success = self.client.save_recording(filename, compress=True)
+                if success:
+                    self.log(f"Recording saved to: {filename}", "success")
+                    messagebox.showinfo("Success", f"Recording saved to:\n{filename}")
+                else:
+                    messagebox.showerror("Error", "Failed to save recording")
+        except Exception as e:
+            self.log(f"Save recording error: {e}", "error")
+            messagebox.showerror("Error", f"Failed to save recording: {e}")
+    
+    def update_recording_stats(self):
+        """Update recording statistics display."""
+        if not self.client:
+            return
+        
+        try:
+            stats = self.client.get_recording_statistics()
+            if stats:
+                self.recording_stats.config(state=tk.NORMAL)
+                self.recording_stats.delete('1.0', tk.END)
+                
+                stats_text = f"Recording Statistics:\n"
+                stats_text += f"{'='*50}\n"
+                stats_text += f"Images recorded: {stats.get('images_recorded', 0)}\n"
+                stats_text += f"Point clouds recorded: {stats.get('pointclouds_recorded', 0)}\n"
+                stats_text += f"States recorded: {stats.get('states_recorded', 0)}\n"
+                stats_text += f"Total entries: {stats.get('total_entries', 0)}\n"
+                stats_text += f"Dropped: {stats.get('dropped', 0)}\n"
+                stats_text += f"Queue size: {stats.get('queue_size', 0)}\n"
+                stats_text += f"Status: {'Recording' if stats.get('is_recording', False) else 'Stopped'}\n"
+                
+                self.recording_stats.insert('1.0', stats_text)
+                self.recording_stats.config(state=tk.DISABLED)
+        except Exception as e:
+            pass  # Silently fail
+    
+    # ---------- Playback control methods ----------
+    
+    def enable_playback_controls(self):
+        """Enable playback control buttons."""
+        self.playback_play_btn.config(state=tk.NORMAL)
+        self.playback_pause_btn.config(state=tk.NORMAL)
+        self.playback_stop_btn.config(state=tk.NORMAL)
+    
+    def disable_playback_controls(self):
+        """Disable playback control buttons."""
+        self.playback_play_btn.config(state=tk.DISABLED)
+        self.playback_pause_btn.config(state=tk.DISABLED)
+        self.playback_stop_btn.config(state=tk.DISABLED)
+        self.playback_progress_label.config(text="0.0%")
+        self.playback_time_label.config(text="0.0s")
+    
+    def load_playback_file(self):
+        """Load a recording file for playback (after connection)."""
+        if not self.client or not isinstance(self.client, MockRosClient):
+            messagebox.showwarning("Warning", "Please connect with Mock Client first")
+            return
+        
+        try:
+            from tkinter import filedialog
+            filename = filedialog.askopenfilename(
+                title="Select Recording File",
+                filetypes=[("ROS Recording", "*.rosrec"), ("All files", "*.*")]
+            )
+            if filename:
+                self.log(f"Loading recording file: {filename}", "info")
+                success = self.client.load_recording_file(filename, auto_play=True, loop=True)
+                if success:
+                    self.playback_file_path.set(filename)
+                    self.enable_playback_controls()
+                    self.log("Recording file loaded and playback started", "success")
+                    messagebox.showinfo("Success", f"Recording file loaded:\n{filename}\n\nPlayback started automatically.")
+                else:
+                    messagebox.showerror("Error", "Failed to load recording file")
+        except Exception as e:
+            self.log(f"Load playback file error: {e}", "error")
+            messagebox.showerror("Error", f"Failed to load recording file: {e}")
+    
+    def playback_play(self):
+        """Start or resume playback."""
+        if not self.client or not isinstance(self.client, MockRosClient):
+            return
+        
+        try:
+            if self.client.playback_is_playing():
+                messagebox.showinfo("Info", "Playback is already running")
+                return
+            
+            success = self.client.playback_play()
+            if success:
+                self.log("Playback started/resumed", "info")
+            else:
+                messagebox.showwarning("Warning", "Failed to start playback")
+        except Exception as e:
+            self.log(f"Playback play error: {e}", "error")
+            messagebox.showerror("Error", f"Failed to start playback: {e}")
+    
+    def playback_pause(self):
+        """Pause playback."""
+        if not self.client or not isinstance(self.client, MockRosClient):
+            return
+        
+        try:
+            success = self.client.playback_pause()
+            if success:
+                self.log("Playback paused", "info")
+        except Exception as e:
+            self.log(f"Playback pause error: {e}", "error")
+    
+    def playback_stop(self):
+        """Stop playback."""
+        if not self.client or not isinstance(self.client, MockRosClient):
+            return
+        
+        try:
+            success = self.client.playback_stop()
+            if success:
+                self.log("Playback stopped", "info")
+        except Exception as e:
+            self.log(f"Playback stop error: {e}", "error")
+    
+    def update_playback_info(self):
+        """Update playback information display."""
+        try:
+            if self.client and isinstance(self.client, MockRosClient) and self.client.is_playback_mode():
+                progress = self.client.playback_get_progress()
+                current_time = self.client.playback_get_current_time()
+                
+                self.playback_progress_label.config(text=f"{progress*100:.1f}%")
+                self.playback_time_label.config(text=f"{current_time:.1f}s")
+            else:
+                self.playback_progress_label.config(text="0.0%")
+                self.playback_time_label.config(text="0.0s")
+        except Exception:
+            pass
+        
+        # Schedule next update
+        self.root.after(500, self.update_playback_info)
 
 
 def main():

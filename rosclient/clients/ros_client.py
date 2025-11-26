@@ -184,31 +184,39 @@ class RosClient(RosClientBase):
     def update_state(self, msg: Dict[str, Any]) -> None:
         """Handle state topic updates."""
         try:
+            update_timestamp = time.time()
             with self._lock:
                 self._state.connected = True
                 self._state.armed = bool(msg.get("armed", self._state.armed))
                 self._state.mode = str(msg.get("mode", self._state.mode))
-                self._state.last_updated = time.time()
+                self._state.last_updated = update_timestamp
+                # Add to state history for synchronization
+                self._add_state_to_history(self._state, update_timestamp)
             
             # Record state if recording is enabled
             if self._recorder and self._recorder.is_recording():
-                self._recorder.record_state(self._state, time.time())
+                with self._lock:
+                    self._recorder.record_state(self._state, update_timestamp)
         except Exception as e:
             self.log.error(f"Error handling state update: {e}")
 
     def update_drone_state(self, msg: Dict[str, Any]) -> None:
         """Handle drone state topic updates."""
         try:
+            update_timestamp = time.time()
             with self._lock:
                 self._state.landed = bool(msg.get("landed", self._state.landed))
                 self._state.returned = bool(msg.get("returned", self._state.returned))
                 self._state.reached = bool(msg.get("reached", self._state.reached))
                 self._state.tookoff = bool(msg.get("tookoff", self._state.tookoff))
-                self._state.last_updated = time.time()
+                self._state.last_updated = update_timestamp
+                # Add to state history for synchronization
+                self._add_state_to_history(self._state, update_timestamp)
             
             # Record state if recording is enabled
             if self._recorder and self._recorder.is_recording():
-                self._recorder.record_state(self._state, time.time())
+                with self._lock:
+                    self._recorder.record_state(self._state, update_timestamp)
         except Exception as e:
             self.log.error(f"Error handling drone state update: {e}")
 
@@ -223,9 +231,13 @@ class RosClient(RosClientBase):
             
             frame, timestamp = result
             
-            # Record image if recording is enabled
+            # Synchronize state with image timestamp
+            synced_state = self.sync_state_with_data(timestamp)
+            self._update_state_with_timestamp(timestamp)
+            
+            # Record image with synchronized state if recording is enabled
             if self._recorder and self._recorder.is_recording():
-                self._recorder.record_image(frame, timestamp)
+                self._recorder.record_image(frame, timestamp, state=synced_state)
             
             # Update cache (non-blocking, drop old frames if queue is full)
             try:
@@ -240,7 +252,6 @@ class RosClient(RosClientBase):
             # Update legacy latest for backward compatibility
             with self._lock:
                 self._latest_image = (frame, timestamp)
-                self._state.last_updated = timestamp
         except Exception as e:
             self.log.error(f"Error processing camera image: {e}")
 
@@ -342,9 +353,13 @@ class RosClient(RosClientBase):
             if result:
                 points, ts = result
                 
-                # Record point cloud if recording is enabled
+                # Synchronize state with point cloud timestamp
+                synced_state = self.sync_state_with_data(ts)
+                self._update_state_with_timestamp(ts)
+                
+                # Record point cloud with synchronized state if recording is enabled
                 if self._recorder and self._recorder.is_recording():
-                    self._recorder.record_pointcloud(points, ts)
+                    self._recorder.record_pointcloud(points, ts, state=synced_state)
                 
                 # Update cache (non-blocking, drop old frames if queue is full)
                 try:
@@ -359,7 +374,6 @@ class RosClient(RosClientBase):
                 # Update legacy latest for backward compatibility
                 with self._lock:
                     self._latest_point_cloud = (points, ts)
-                    self._state.last_updated = ts
         except Exception as e:
             self.log.error(f"Error handling point cloud update: {e}")
 
@@ -408,6 +422,7 @@ class RosClient(RosClientBase):
     def update_battery(self, msg: Dict[str, Any]) -> None:
         """Handle battery topic updates."""
         try:
+            update_timestamp = time.time()
             with self._lock:
                 p = msg.get("percentage", msg.get("percent", msg.get("battery", 1.0)))
                 try:
@@ -415,17 +430,21 @@ class RosClient(RosClientBase):
                     self._state.battery = (p_val * 100.0) if p_val <= 1.0 else p_val
                 except Exception:
                     self.log.debug("Unable to parse battery percentage; leaving previous value")
-                self._state.last_updated = time.time()
+                self._state.last_updated = update_timestamp
+                # Add to state history for synchronization
+                self._add_state_to_history(self._state, update_timestamp)
             
             # Record state if recording is enabled
             if self._recorder and self._recorder.is_recording():
-                self._recorder.record_state(self._state, time.time())
+                with self._lock:
+                    self._recorder.record_state(self._state, update_timestamp)
         except Exception as e:
             self.log.error(f"Error handling battery update: {e}")
 
     def update_gps(self, msg: Dict[str, Any]) -> None:
         """Handle GPS topic updates."""
         try:
+            update_timestamp = time.time()
             with self._lock:
                 try:
                     self._state.latitude = float(msg.get("latitude", msg.get("lat", self._state.latitude)))
@@ -433,11 +452,14 @@ class RosClient(RosClientBase):
                     self._state.altitude = float(msg.get("altitude", msg.get("alt", self._state.altitude)))
                 except Exception:
                     self.log.debug("Partial or invalid GPS data received")
-                self._state.last_updated = time.time()
+                self._state.last_updated = update_timestamp
+                # Add to state history for synchronization
+                self._add_state_to_history(self._state, update_timestamp)
             
             # Record state if recording is enabled
             if self._recorder and self._recorder.is_recording():
-                self._recorder.record_state(self._state, time.time())
+                with self._lock:
+                    self._recorder.record_state(self._state, update_timestamp)
         except Exception as e:
             self.log.error(f"Error handling GPS update: {e}")
 

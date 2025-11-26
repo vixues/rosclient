@@ -250,8 +250,8 @@ class RecordPlayer:
             # Decode and play entry
             result = self.recorder.decode_entry(entry)
             if result:
-                data, timestamp = result
-                self._play_entry(entry.data_type, data, timestamp)
+                data, timestamp, synced_state = result
+                self._play_entry(entry.data_type, data, timestamp, synced_state)
                 
                 with self._lock:
                     self._stats["entries_played"] += 1
@@ -279,14 +279,29 @@ class RecordPlayer:
         self,
         data_type: str,
         data: Any,
-        timestamp: float
+        timestamp: float,
+        synced_state: Optional[DroneState] = None
     ) -> None:
-        """Play a single entry by calling appropriate callback."""
+        """
+        Play a single entry by calling appropriate callback.
+        
+        Args:
+            data_type: Type of data ('image', 'pointcloud', 'state')
+            data: The data to play
+            timestamp: Timestamp of the data
+            synced_state: Optional synchronized state snapshot
+        """
         try:
             if data_type == "image" and self._image_callback:
                 self._image_callback(data, timestamp)
+                # If synchronized state is available, also update state callback
+                if synced_state and self._state_callback:
+                    self._state_callback(synced_state, timestamp)
             elif data_type == "pointcloud" and self._pointcloud_callback:
                 self._pointcloud_callback(data, timestamp)
+                # If synchronized state is available, also update state callback
+                if synced_state and self._state_callback:
+                    self._state_callback(synced_state, timestamp)
             elif data_type == "state" and self._state_callback:
                 self._state_callback(data, timestamp)
         except Exception as e:
@@ -346,7 +361,7 @@ class RecordPlayer:
                 "progress": self.get_progress()
             }
     
-    def get_entry_at_index(self, index: int) -> Optional[Tuple[Any, float]]:
+    def get_entry_at_index(self, index: int) -> Optional[Tuple[Any, float, Optional[DroneState]]]:
         """
         Get entry at specific index (for manual playback).
         
@@ -354,15 +369,15 @@ class RecordPlayer:
             index: Entry index
             
         Returns:
-            Tuple of (data, timestamp) or None
+            Tuple of (data, timestamp, state) or None
         """
         entries = self.recorder.get_entries()
         if 0 <= index < len(entries):
             return self.recorder.decode_entry(entries[index])
         return None
     
-    def get_all_images(self) -> List[Tuple[np.ndarray, float]]:
-        """Get all images from recording."""
+    def get_all_images(self) -> List[Tuple[np.ndarray, float, Optional[DroneState]]]:
+        """Get all images from recording with optional synchronized states."""
         entries = self.recorder.get_entries(data_type="image")
         results = []
         for entry in entries:
@@ -371,8 +386,8 @@ class RecordPlayer:
                 results.append(result)
         return results
     
-    def get_all_pointclouds(self) -> List[Tuple[np.ndarray, float]]:
-        """Get all point clouds from recording."""
+    def get_all_pointclouds(self) -> List[Tuple[np.ndarray, float, Optional[DroneState]]]:
+        """Get all point clouds from recording with optional synchronized states."""
         entries = self.recorder.get_entries(data_type="pointcloud")
         results = []
         for entry in entries:
@@ -381,7 +396,7 @@ class RecordPlayer:
                 results.append(result)
         return results
     
-    def get_all_states(self) -> List[Tuple[DroneState, float]]:
+    def get_all_states(self) -> List[Tuple[DroneState, float, None]]:
         """Get all states from recording."""
         entries = self.recorder.get_entries(data_type="state")
         results = []

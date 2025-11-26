@@ -198,13 +198,14 @@ class Recorder:
         with self._lock:
             return self._is_recording
     
-    def record_image(self, image: np.ndarray, timestamp: float) -> bool:
+    def record_image(self, image: np.ndarray, timestamp: float, state: Optional[DroneState] = None) -> bool:
         """
-        Record an image.
+        Record an image with optional synchronized state.
         
         Args:
             image: Image array (H, W, 3) RGB format
             timestamp: Timestamp
+            state: Optional synchronized state snapshot
             
         Returns:
             True if successfully queued, False otherwise
@@ -230,15 +231,23 @@ class Recorder:
                 # Fallback: use numpy array directly (less efficient)
                 compressed_data = image.tobytes()
             
+            # Prepare metadata with optional state
+            metadata = {
+                "shape": image.shape,
+                "dtype": str(image.dtype),
+                "compressed": HAS_CV2
+            }
+            
+            # Add state snapshot to metadata if provided
+            if state is not None:
+                from dataclasses import asdict
+                metadata["synchronized_state"] = asdict(state)
+            
             entry = RecordEntry(
                 timestamp=timestamp,
                 data_type="image",
                 data=compressed_data,
-                metadata={
-                    "shape": image.shape,
-                    "dtype": str(image.dtype),
-                    "compressed": HAS_CV2
-                }
+                metadata=metadata
             )
             
             try:
@@ -255,13 +264,14 @@ class Recorder:
             self.log.error(f"Error recording image: {e}")
             return False
     
-    def record_pointcloud(self, points: np.ndarray, timestamp: float) -> bool:
+    def record_pointcloud(self, points: np.ndarray, timestamp: float, state: Optional[DroneState] = None) -> bool:
         """
-        Record a point cloud.
+        Record a point cloud with optional synchronized state.
         
         Args:
             points: Point cloud array (N, 3)
             timestamp: Timestamp
+            state: Optional synchronized state snapshot
             
         Returns:
             True if successfully queued, False otherwise
@@ -278,16 +288,24 @@ class Recorder:
             points_float32 = points.astype(np.float32)
             compressed_data = gzip.compress(points_float32.tobytes())
             
+            # Prepare metadata with optional state
+            metadata = {
+                "shape": points.shape,
+                "dtype": str(points.dtype),
+                "num_points": len(points),
+                "compressed": True
+            }
+            
+            # Add state snapshot to metadata if provided
+            if state is not None:
+                from dataclasses import asdict
+                metadata["synchronized_state"] = asdict(state)
+            
             entry = RecordEntry(
                 timestamp=timestamp,
                 data_type="pointcloud",
                 data=compressed_data,
-                metadata={
-                    "shape": points.shape,
-                    "dtype": str(points.dtype),
-                    "num_points": len(points),
-                    "compressed": True
-                }
+                metadata=metadata
             )
             
             try:
@@ -619,17 +637,27 @@ class Recorder:
             
             return entries
     
-    def decode_entry(self, entry: RecordEntry) -> Optional[Tuple[Any, float]]:
+    def decode_entry(self, entry: RecordEntry) -> Optional[Tuple[Any, float, Optional[DroneState]]]:
         """
-        Decode a record entry back to original format.
+        Decode a record entry back to original format with optional synchronized state.
         
         Args:
             entry: RecordEntry to decode
             
         Returns:
-            Tuple of (data, timestamp) or None if decoding fails
+            Tuple of (data, timestamp, state) or None if decoding fails
+            state is None if no synchronized state is available
         """
         try:
+            state = None
+            # Extract synchronized state from metadata if available
+            if "synchronized_state" in entry.metadata:
+                from ..models.drone import DroneState
+                try:
+                    state = DroneState(**entry.metadata["synchronized_state"])
+                except Exception as e:
+                    self.log.warning(f"Failed to decode synchronized state: {e}")
+            
             if entry.data_type == "image":
                 if HAS_CV2 and entry.metadata.get("compressed", False):
                     # Decode JPEG
@@ -638,7 +666,7 @@ class Recorder:
                     if img is not None:
                         # Convert BGR to RGB
                         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-                        return (img, entry.timestamp)
+                        return (img, entry.timestamp, state)
                 else:
                     # Fallback: try to reconstruct from bytes
                     if HAS_NUMPY and "shape" in entry.metadata:
@@ -646,7 +674,7 @@ class Recorder:
                         dtype_str = entry.metadata.get("dtype", "uint8")
                         dtype = np.dtype(dtype_str)
                         img = np.frombuffer(entry.data, dtype=dtype).reshape(shape)
-                        return (img, entry.timestamp)
+                        return (img, entry.timestamp, state)
             
             elif entry.data_type == "pointcloud":
                 if HAS_NUMPY:
@@ -656,13 +684,13 @@ class Recorder:
                     dtype_str = entry.metadata.get("dtype", "float32")
                     dtype = np.dtype(dtype_str)
                     points = np.frombuffer(decompressed, dtype=dtype).reshape(shape)
-                    return (points, entry.timestamp)
+                    return (points, entry.timestamp, state)
             
             elif entry.data_type == "state":
                 # State is already a dictionary
                 from ..models.drone import DroneState
                 state = DroneState(**entry.data)
-                return (state, entry.timestamp)
+                return (state, entry.timestamp, None)
             
             return None
         except Exception as e:

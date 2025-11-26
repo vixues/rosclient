@@ -1,6 +1,7 @@
 """Base class for ROS clients."""
 from __future__ import annotations
 
+import copy
 import math
 import threading
 import time
@@ -37,6 +38,11 @@ class RosClientBase(ABC):
         # Recording support
         self._recorder: Optional[Recorder] = None
         self._recording_config = self._config.get("recording", {})
+        
+        # State synchronization support
+        self._state_sync_enabled = self._config.get("state_sync_enabled", True)
+        self._state_history: list[tuple[DroneState, float]] = []  # (state, timestamp) pairs
+        self._max_state_history = self._config.get("max_state_history", 100)
 
     def is_connected(self) -> bool:
         """
@@ -137,12 +143,16 @@ class RosClientBase(ABC):
                 except Exception:
                     self.log.debug("Partial or invalid odometry position data; skipping position update")
 
-                self._state.last_updated = time.time()
+                update_timestamp = time.time()
+                self._state.last_updated = update_timestamp
+                # Add to state history for synchronization
+                self._add_state_to_history(self._state, update_timestamp)
             self.log.debug(f"Odometry updated: roll={roll_deg:.3f}, pitch={pitch_deg:.3f}, yaw={yaw_deg:.3f}")
             
             # Record state if recording is enabled
             if self._recorder and self._recorder.is_recording():
-                self._recorder.record_state(self._state, time.time())
+                with self._lock:
+                    self._recorder.record_state(self._state, update_timestamp)
         except Exception as e:
             self.log.exception(f"Error handling odometry update: {e}")
     
@@ -250,4 +260,95 @@ class RosClientBase(ABC):
         if self._recorder:
             return self._recorder.get_statistics()
         return None
+    
+    # ---------- State synchronization methods ----------
+    
+    def _add_state_to_history(self, state: DroneState, timestamp: float) -> None:
+        """
+        Add state snapshot to history for synchronization.
+        
+        Args:
+            state: State snapshot
+            timestamp: Timestamp of the state
+        """
+        if not self._state_sync_enabled:
+            return
+        
+        with self._lock:
+            # Create a deep copy to avoid reference issues
+            state_copy = copy.deepcopy(state)
+            self._state_history.append((state_copy, timestamp))
+            
+            # Keep history size bounded
+            if len(self._state_history) > self._max_state_history:
+                self._state_history.pop(0)
+    
+    def get_state_at_timestamp(self, timestamp: float, tolerance: float = 0.1) -> Optional[DroneState]:
+        """
+        Get state snapshot closest to the given timestamp.
+        
+        Args:
+            timestamp: Target timestamp
+            tolerance: Maximum time difference in seconds
+            
+        Returns:
+            State snapshot or None if not found within tolerance
+        """
+        if not self._state_sync_enabled or not self._state_history:
+            # Fallback to current state
+            with self._lock:
+                return copy.deepcopy(self._state)
+        
+        with self._lock:
+            # Find closest state in history
+            best_state = None
+            best_diff = float('inf')
+            
+            for state, state_ts in self._state_history:
+                diff = abs(state_ts - timestamp)
+                if diff < best_diff:
+                    best_diff = diff
+                    best_state = state
+            
+            # If within tolerance, return it; otherwise return current state
+            if best_diff <= tolerance and best_state:
+                return copy.deepcopy(best_state)
+            else:
+                # Return current state as fallback
+                return copy.deepcopy(self._state)
+    
+    def _update_state_with_timestamp(self, timestamp: float) -> None:
+        """
+        Update state's last_updated timestamp and add to history.
+        
+        Args:
+            timestamp: Timestamp to set
+        """
+        with self._lock:
+            self._state.last_updated = timestamp
+            self._add_state_to_history(self._state, timestamp)
+    
+    def sync_state_with_data(self, data_timestamp: float) -> DroneState:
+        """
+        Get synchronized state for a given data timestamp.
+        This ensures state is aligned with image/pointcloud timestamps.
+        
+        Args:
+            data_timestamp: Timestamp of the data (image/pointcloud)
+            
+        Returns:
+            Synchronized state snapshot
+        """
+        if not self._state_sync_enabled:
+            with self._lock:
+                return copy.deepcopy(self._state)
+        
+        # Get state closest to data timestamp
+        synced_state = self.get_state_at_timestamp(data_timestamp, tolerance=0.5)
+        if synced_state:
+            return synced_state
+        
+        # Fallback: return current state
+        with self._lock:
+            return copy.deepcopy(self._state)
 
