@@ -230,13 +230,20 @@ class RosClient(RosClientBase):
                 try:
                     img_data = base64.b64decode(msg["data"]) if msg["data"] else b""
                     self.log.debug(f"Base64 decoded to {len(img_data)} bytes")
+                    self.log.debug(f"Base64 payload first 100 bytes (hex): {img_data[:100].hex()}")
                     np_arr = np.frombuffer(img_data, np.uint8)
-                    self.log.debug(f"Numpy array shape: {np_arr.shape}")
+                    self.log.debug(f"Numpy array shape: {np_arr.shape}, dtype: {np_arr.dtype}, min={np_arr.min()}, max={np_arr.max()}")
                     frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
                     if frame is not None:
                         self.log.info(f"Successfully decoded frame: shape={frame.shape}, dtype={frame.dtype}")
                     else:
-                        self.log.warning("cv2.imdecode returned None for base64 payload")
+                        self.log.warning(f"cv2.imdecode returned None for base64 payload (decoded_size={len(img_data)}, array_size={np_arr.size})")
+                        self.log.warning(f"Trying alternative decode with cv2.IMREAD_UNCHANGED...")
+                        frame = cv2.imdecode(np_arr, cv2.IMREAD_UNCHANGED)
+                        if frame is not None:
+                            self.log.info(f"Alternative decode succeeded: shape={frame.shape}, dtype={frame.dtype}")
+                        else:
+                            self.log.error(f"All decode attempts failed. Payload appears corrupted or in unsupported format")
                 except Exception as b64_err:
                     self.log.error(f"Base64 decode error: {b64_err}")
             elif "encoding" in msg and "data" in msg:
@@ -315,9 +322,19 @@ class RosClient(RosClientBase):
                 frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
             elif "data" in msg and isinstance(msg["data"], str):
                 self.log.debug("fetch_camera_image: base64 payload (decoding)")
-                img_data = base64.b64decode(msg["data"]) if msg["data"] else b""
-                np_arr = np.frombuffer(img_data, np.uint8)
-                frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+                try:
+                    img_data = base64.b64decode(msg["data"]) if msg["data"] else b""
+                    self.log.debug(f"Base64 decoded to {len(img_data)} bytes")
+                    self.log.debug(f"Payload preview (first 100 bytes hex): {img_data[:100].hex()}")
+                    np_arr = np.frombuffer(img_data, np.uint8)
+                    self.log.debug(f"Numpy array: shape={np_arr.shape}, min={np_arr.min()}, max={np_arr.max()}")
+                    frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+                    if frame is None:
+                        self.log.warning(f"cv2.imdecode(IMREAD_COLOR) returned None, trying IMREAD_UNCHANGED...")
+                        frame = cv2.imdecode(np_arr, cv2.IMREAD_UNCHANGED)
+                except Exception as e:
+                    self.log.error(f"Base64 decode error in fetch_camera_image: {e}", exc_info=True)
+                    return None
             elif "encoding" in msg and "data" in msg:
                 h = int(msg.get("height", 0))
                 w = int(msg.get("width", 0))
