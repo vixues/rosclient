@@ -204,35 +204,62 @@ class RosClient(RosClientBase):
 
     def update_camera(self, msg: Dict[str, Any]) -> None:
         """Receive camera image messages and convert to OpenCV format."""
-        self.log.info("Received camera message (unable to summarize payload)")
+        try:
+            # Log comprehensive message metadata for diagnostics
+            msg_keys = list(msg.keys())
+            data_type = type(msg.get("data")).__name__ if "data" in msg else "N/A"
+            data_len = len(msg.get("data")) if isinstance(msg.get("data"), (bytes, bytearray, str)) else "N/A"
+            self.log.info(f"Received camera message: keys={msg_keys}, data_type={data_type}, data_len={data_len}")
+        except Exception as e:
+            self.log.warning(f"Failed to log camera message metadata: {e}")
+        
         try:
             frame = None
             # CompressedImage: typically has 'data' with base64 or raw bytes
             if "data" in msg and isinstance(msg["data"], (bytes, bytearray)):
-                self.log.debug("Camera payload: raw bytes")
+                self.log.info(f"Camera payload branch: raw bytes, size={len(msg['data'])} bytes")
                 np_arr = np.frombuffer(msg["data"], np.uint8)
+                self.log.debug(f"Numpy array shape: {np_arr.shape}")
                 frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+                if frame is not None:
+                    self.log.info(f"Successfully decoded frame: shape={frame.shape}, dtype={frame.dtype}")
+                else:
+                    self.log.warning("cv2.imdecode returned None for raw bytes payload")
             elif "data" in msg and isinstance(msg["data"], str):
-                self.log.debug("Camera payload: base64 string (will decode)")
-                img_data = base64.b64decode(msg["data"]) if msg["data"] else b""
-                np_arr = np.frombuffer(img_data, np.uint8)
-                frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+                self.log.info(f"Camera payload branch: base64 string, encoded_size={len(msg['data'])} chars")
+                try:
+                    img_data = base64.b64decode(msg["data"]) if msg["data"] else b""
+                    self.log.debug(f"Base64 decoded to {len(img_data)} bytes")
+                    np_arr = np.frombuffer(img_data, np.uint8)
+                    self.log.debug(f"Numpy array shape: {np_arr.shape}")
+                    frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+                    if frame is not None:
+                        self.log.info(f"Successfully decoded frame: shape={frame.shape}, dtype={frame.dtype}")
+                    else:
+                        self.log.warning("cv2.imdecode returned None for base64 payload")
+                except Exception as b64_err:
+                    self.log.error(f"Base64 decode error: {b64_err}")
             elif "encoding" in msg and "data" in msg:
                 height = int(msg.get("height", 0))
                 width = int(msg.get("width", 0))
                 encoding = msg.get("encoding", "bgr8")
                 channels = 3 if encoding in ("rgb8", "bgr8") else 1
+                self.log.info(f"Camera payload branch: raw buffer, encoding={encoding}, dims={width}x{height}, channels={channels}")
                 img_data = np.frombuffer(msg["data"], dtype=np.uint8)
-                if height > 0 and width > 0 and img_data.size == height * width * channels:
+                expected_size = height * width * channels
+                actual_size = img_data.size
+                self.log.debug(f"Buffer size check: expected={expected_size}, actual={actual_size}")
+                if height > 0 and width > 0 and actual_size == expected_size:
                     frame = img_data.reshape((height, width, channels))
+                    self.log.info(f"Successfully reshaped frame: shape={frame.shape}, dtype={frame.dtype}")
                 else:
-                    self.log.debug("Raw image shape mismatch; cannot reshape")
+                    self.log.warning(f"Raw image shape mismatch: expected {expected_size} bytes, got {actual_size} bytes")
             else:
-                self.log.warning("Received unknown camera message format")
+                self.log.warning(f"Received unknown camera message format. Message keys: {list(msg.keys())}")
                 return
 
             if frame is None:
-                self.log.warning("Failed to decode camera frame (cv2.imdecode returned None)")
+                self.log.warning("Failed to decode camera frame (frame is None after all branches)")
                 return
 
             timestamp = time.time()
@@ -240,22 +267,24 @@ class RosClient(RosClientBase):
             # Update cache (non-blocking, drop old frames if queue is full)
             try:
                 self._image_cache.put_nowait((frame, timestamp))
+                self.log.debug(f"Added frame to cache at {timestamp:.3f}s")
             except queue.Full:
                 # Queue is full, remove oldest and add new
                 try:
-                    self._image_cache.get_nowait()
+                    old_frame = self._image_cache.get_nowait()
                     self._image_cache.put_nowait((frame, timestamp))
+                    self.log.debug(f"Cache full, dropped old frame and added new frame at {timestamp:.3f}s")
                 except queue.Empty:
-                    pass
+                    self.log.warning("Cache full but was empty when trying to remove frame")
             
             # Update legacy latest for backward compatibility
             with self._lock:
                 self._latest_image = (frame, timestamp)
                 self._state.last_updated = timestamp
 
-            self.log.debug(f"Received camera frame at {timestamp:.3f}s")
+            self.log.info(f"Camera frame successfully processed and cached: shape={frame.shape} at {timestamp:.3f}s")
         except Exception as e:
-            self.log.exception(f"Error decoding camera image: {e}")
+            self.log.exception(f"Error decoding camera image: {e}", exc_info=True)
 
     def fetch_camera_image(self) -> Optional[Tuple[np.ndarray, float]]:
         """

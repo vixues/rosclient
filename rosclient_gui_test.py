@@ -95,7 +95,7 @@ class RosClientGUITest:
         conn_group.pack(fill=tk.X, padx=10, pady=5)
         
         ttk.Label(conn_group, text="WebSocket地址:").grid(row=0, column=0, sticky=tk.W, pady=5)
-        self.connection_url = tk.StringVar(value="ws://localhost:9090")
+        self.connection_url = tk.StringVar(value="ws://192.168.27.152:9090")
         ttk.Entry(conn_group, textvariable=self.connection_url, width=40).grid(
             row=0, column=1, padx=5, pady=5
         )
@@ -292,7 +292,7 @@ class RosClientGUITest:
         test_group.pack(fill=tk.X, padx=10, pady=5)
         
         ttk.Label(test_group, text="测试地址:").grid(row=0, column=0, sticky=tk.W, pady=5)
-        self.test_url = tk.StringVar(value="ws://localhost:9090")
+        self.test_url = tk.StringVar(value="ws://192.168.27.152:9090")
         ttk.Entry(test_group, textvariable=self.test_url, width=40).grid(
             row=0, column=1, padx=5, pady=5
         )
