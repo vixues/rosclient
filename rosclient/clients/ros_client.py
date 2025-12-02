@@ -1,7 +1,7 @@
 """Production ROS client implementation."""
 from __future__ import annotations
 
-import base64
+import copy
 import logging
 import queue
 import random
@@ -11,20 +11,30 @@ from concurrent.futures import ThreadPoolExecutor, Future, TimeoutError as Futur
 from typing import Optional, Dict, Any, Tuple
 from urllib.parse import urlparse
 
-import cv2
 import numpy as np
 import roslibpy
 
 from ..core.base import RosClientBase
 from ..core.topic_service_manager import TopicServiceManager
 from ..models.state import ConnectionState
+from ..processors.image_processor import ImageProcessor
+from ..processors.pointcloud_processor import PointCloudProcessor
 from ..utils.backoff import exponential_backoff
 from ..utils.logger import setup_logger
 from .config import DEFAULT_CONFIG, DEFAULT_TOPICS
 
 
 class RosClient(RosClientBase):
-    """Production ROS client using roslibpy."""
+    """
+    Production ROS client using roslibpy.
+    
+    Architecture Design:
+    - Acts as a mediator/proxy client between GUI and ROS device
+    - Uses ROS topic subscriptions for real-time data acquisition (non-blocking)
+    - Command operations (service_call, publish) are asynchronous and don't block data flow
+    - Optimized for low latency: minimizes lock holding time in callbacks
+    - Data acquisition callbacks run in separate threads, ensuring real-time updates
+    """
 
     def __init__(self, connection_str: str, config: Optional[Dict[str, Any]] = None):
         """
@@ -52,16 +62,20 @@ class RosClient(RosClientBase):
         self._ts_mgr: Optional[TopicServiceManager] = None
         
         # High-frequency cache for images and point clouds
-        # Use queues with maxsize to keep only the latest frames (drop old ones)
-        self._image_cache: queue.Queue = queue.Queue(maxsize=3)  # Keep latest 3 frames
-        self._pointcloud_cache: queue.Queue = queue.Queue(maxsize=3)  # Keep latest 3 frames
+        # Use queues with maxsize=1 for lowest latency (always get latest frame)
+        # This ensures we always have the most recent frame without blocking
+        self._image_cache: queue.Queue = queue.Queue(maxsize=1)  # Keep only latest frame (lowest latency)
+        self._pointcloud_cache: queue.Queue = queue.Queue(maxsize=1)  # Keep only latest frame
         
         # Legacy support - keep latest for backward compatibility
         self._latest_image: Optional[Tuple[np.ndarray, float]] = None
         self._latest_point_cloud: Optional[Tuple[np.ndarray, float]] = None
 
+        # Initialize processors
         self.log = setup_logger(f"RosClient[{self._host}:{self._port}]")
         self.log.setLevel(self._config.get("logger_level", logging.INFO))
+        self._image_processor = ImageProcessor(self.log)
+        self._pointcloud_processor = PointCloudProcessor(self.log)
 
     def _ensure_ts_mgr(self) -> TopicServiceManager:
         """
@@ -115,11 +129,12 @@ class RosClient(RosClientBase):
                                 self._subscribe_topics()
                             except Exception as e:
                                 self.log.warning(f"Subscription setup failed: {e}")
+                                raise
                             return
                         else:
                             self.log.warning("roslibpy reported not connected after run()")
                     except Exception as e:
-                        self.log.warning(f"Connect attempt {attempt} failed: {e}", exc_info=True)
+                        self.log.warning(f"Connect attempt {attempt} failed: {e}")
 
                     sleep_time = exponential_backoff(base_backoff, attempt, max_backoff)
                     self.log.debug(f"Sleeping {sleep_time:.2f}s before next connect attempt")
@@ -173,169 +188,116 @@ class RosClient(RosClientBase):
             self._ts_mgr.topic(cam_name, cam_type).subscribe(self.update_camera)
             self._ts_mgr.topic(DEFAULT_TOPICS["point_cloud"].name, DEFAULT_TOPICS["point_cloud"].type).subscribe(self.update_point_cloud)
         except Exception as e:
-            self.log.exception(f"Failed to subscribe topics: {e}")
+            self.log.error(f"Failed to subscribe topics: {e}")
 
     # ---------- topic handlers ----------
 
     def update_state(self, msg: Dict[str, Any]) -> None:
-        """Handle state topic updates."""
+        """
+        Handle state topic updates.
+        
+        Optimized for low latency: minimize lock holding time.
+        This is called from ROS subscription callback (separate thread).
+        """
         try:
+            update_timestamp = time.time()
+            
+            # Minimize lock scope - only hold lock for state update
             with self._lock:
                 self._state.connected = True
                 self._state.armed = bool(msg.get("armed", self._state.armed))
                 self._state.mode = str(msg.get("mode", self._state.mode))
-                self._state.last_updated = time.time()
-            self.log.debug(f"State updated: mode={self._state.mode}, armed={self._state.armed}")
+                self._state.last_updated = update_timestamp
+                # Add to state history for synchronization
+                self._add_state_to_history(self._state, update_timestamp)
+            
+            # Recording is done outside lock to minimize blocking
+            # Recording operations are thread-safe internally
+            if self._recorder and self._recorder.is_recording():
+                # Get state snapshot for recording (quick read)
+                with self._lock:
+                    state_snapshot = copy.copy(self._state)
+                self._recorder.record_state(state_snapshot, update_timestamp)
         except Exception as e:
-            self.log.exception(f"Error handling state update: {e}")
+            self.log.error(f"Error handling state update: {e}")
 
     def update_drone_state(self, msg: Dict[str, Any]) -> None:
-        """Handle drone state topic updates."""
+        """
+        Handle drone state topic updates.
+        
+        Optimized for low latency: minimize lock holding time.
+        This is called from ROS subscription callback (separate thread).
+        """
         try:
+            update_timestamp = time.time()
+            
+            # Minimize lock scope - only hold lock for state update
             with self._lock:
                 self._state.landed = bool(msg.get("landed", self._state.landed))
                 self._state.returned = bool(msg.get("returned", self._state.returned))
                 self._state.reached = bool(msg.get("reached", self._state.reached))
                 self._state.tookoff = bool(msg.get("tookoff", self._state.tookoff))
-                self._state.last_updated = time.time()
-            self.log.debug(f"Drone state updated: landed={self._state.landed}, returned={self._state.returned}")
+                self._state.last_updated = update_timestamp
+                # Add to state history for synchronization
+                self._add_state_to_history(self._state, update_timestamp)
+            
+            # Recording is done outside lock to minimize blocking
+            if self._recorder and self._recorder.is_recording():
+                # Get state snapshot for recording (quick read)
+                with self._lock:
+                    state_snapshot = copy.copy(self._state)
+                self._recorder.record_state(state_snapshot, update_timestamp)
         except Exception as e:
-            self.log.exception(f"Error handling drone state update: {e}")
+            self.log.error(f"Error handling drone state update: {e}")
 
     def update_camera(self, msg: Dict[str, Any]) -> None:
-        """Receive camera image messages and convert to OpenCV format."""
-        try:
-            # Log comprehensive message metadata for diagnostics
-            msg_keys = list(msg.keys())
-            data_type = type(msg.get("data")).__name__ if "data" in msg else "N/A"
-            data_len = len(msg.get("data")) if isinstance(msg.get("data"), (bytes, bytearray, str)) else "N/A"
-            self.log.info(f"Received camera message: keys={msg_keys}, data_type={data_type}, data_len={data_len}")
-        except Exception as e:
-            self.log.warning(f"Failed to log camera message metadata: {e}")
+        """
+        Receive camera image messages and convert to OpenCV format.
         
+        Optimized for low latency: minimize processing time and lock holding.
+        This is called from ROS subscription callback (separate thread).
+        """
         try:
-            frame = None
-            # CompressedImage: typically has 'data' with base64 or raw bytes
-            if "data" in msg and isinstance(msg["data"], (bytes, bytearray)):
-                self.log.info(f"Camera payload branch: raw bytes, size={len(msg['data'])} bytes")
-                np_arr = np.frombuffer(msg["data"], np.uint8)
-                self.log.info(f"Numpy array shape: {np_arr.shape}")
-                frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
-                if frame is not None:
-                    self.log.info(f"Successfully decoded frame: shape={frame.shape}, dtype={frame.dtype}")
-                else:
-                    self.log.warning("cv2.imdecode returned None for raw bytes payload")
-            elif "data" in msg and isinstance(msg["data"], str):
-                self.log.info(f"Camera payload branch: base64 string, encoded_size={len(msg['data'])} chars")
-                try:
-                    # Step 1: Base64 decode
-                    self.log.info(f"Step 1: Starting base64 decode from {len(msg['data'])} characters")
-                    img_data = base64.b64decode(msg["data"]) if msg["data"] else b""
-                    self.log.info(f"Step 1 result: Base64 decoded successfully to {len(img_data)} bytes")
-
-                    # Step 2: Analyze payload signature
-                    self.log.info(f"Step 2: Analyzing payload signature (first 20 bytes)")
-                    hex_sig = img_data[:20].hex()
-                    self.log.info(f"Step 2 result: Payload signature (hex): {hex_sig}")
-
-                    # Detect format from magic bytes
-                    if img_data.startswith(b'\xff\xd8\xff'):
-                        format_detected = "JPEG"
-                    elif img_data.startswith(b'\x89PNG'):
-                        format_detected = "PNG"
-                    elif img_data.startswith(b'BM'):
-                        format_detected = "BMP"
-                    elif img_data.startswith(b'GIF'):
-                        format_detected = "GIF"
-                    elif img_data.startswith(b'RIFF') and img_data[8:12] == b'WEBP':
-                        format_detected = "WebP"
-                    else:
-                        format_detected = "RAW"
-                    self.log.info(f"Step 2 detail: Detected format from magic bytes: {format_detected}")
-
-                    # Step 3: Convert to numpy array
-                    self.log.info(f"Step 3: Converting decoded bytes to numpy array (uint8)")
-                    np_arr = np.frombuffer(img_data, dtype=np.uint8)
-                    self.log.info(f"Step 3 result: Numpy array created - shape={np_arr.shape}, dtype={np_arr.dtype}, size={np_arr.size} bytes")
-
-                    # Step 4: Attempt cv2.imdecode if it's compressed
-                    frame = None
-                    if format_detected in ["JPEG", "PNG", "BMP", "GIF", "WebP"]:
-                        self.log.info(f"Step 4: Attempting cv2.imdecode with IMREAD_COLOR flag")
-                        frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
-
-                    # Step 5: If imdecode failed or RAW format, try manual reshape
-                    if frame is None:
-                        self.log.warning(f"Step 4 result: cv2.imdecode returned None, attempting manual reshape")
-                        try:
-                            # 需要知道 width, height, channels
-                            width = msg.get("width")
-                            height = msg.get("height")
-                            encoding = msg.get("encoding", "bgr8")
-                            channels = 3 if encoding in ["bgr8", "rgb8"] else 1
-
-                            if width and height:
-                                frame = np_arr.reshape((height, width, channels))
-                                if encoding == "rgb8":
-                                    frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-                                self.log.info(f"Step 5 result: Successfully reshaped raw data to frame")
-                                self.log.info(f"Frame shape={frame.shape}, dtype={frame.dtype}, size={frame.nbytes} bytes")
-                            else:
-                                self.log.error(f"Cannot reshape raw data: missing width/height info")
-                        except Exception as reshape_err:
-                            self.log.error(f"Manual reshape failed: {type(reshape_err).__name__}: {reshape_err}", exc_info=True)
-                    else:
-                        self.log.info(f"Step 4 result: cv2.imdecode successful, frame ready")
-                
-                except Exception as b64_err:
-                    self.log.error(f"Base64 decoding exception: {type(b64_err).__name__}: {b64_err}", exc_info=True)
-
-            elif "encoding" in msg and "data" in msg:
-                height = int(msg.get("height", 0))
-                width = int(msg.get("width", 0))
-                encoding = msg.get("encoding", "bgr8")
-                channels = 3 if encoding in ("rgb8", "bgr8") else 1
-                self.log.info(f"Camera payload branch: raw buffer, encoding={encoding}, dims={width}x{height}, channels={channels}")
-                img_data = np.frombuffer(msg["data"], dtype=np.uint8)
-                expected_size = height * width * channels
-                actual_size = img_data.size
-                self.log.info(f"Buffer size check: expected={expected_size}, actual={actual_size}")
-                if height > 0 and width > 0 and actual_size == expected_size:
-                    frame = img_data.reshape((height, width, channels))
-                    self.log.info(f"Successfully reshaped frame: shape={frame.shape}, dtype={frame.dtype}")
-                else:
-                    self.log.warning(f"Raw image shape mismatch: expected {expected_size} bytes, got {actual_size} bytes")
-            else:
-                self.log.warning(f"Received unknown camera message format. Message keys: {list(msg.keys())}")
+            # Use simple processing for subscription (no plugins to avoid blocking)
+            result = self._image_processor.process_simple(msg)
+            if result is None:
+                self.log.warning("Failed to decode camera frame")
                 return
-
-            if frame is None:
-                self.log.warning("Failed to decode camera frame (frame is None after all branches)")
-                return
-
-            timestamp = time.time()
             
-            # Update cache (non-blocking, drop old frames if queue is full)
+            frame, timestamp = result
+            
+            # Synchronize state with image timestamp (quick operation)
+            synced_state = self.sync_state_with_data(timestamp)
+            self._update_state_with_timestamp(timestamp)
+            
+            # Update cache first (non-blocking, highest priority for real-time display)
+            # Use put_nowait with get_nowait to ensure we always have the latest frame
             try:
-                self._image_cache.put_nowait((frame, timestamp))
-                self.log.info(f"Added frame to cache at {timestamp:.3f}s")
-            except queue.Full:
-                # Queue is full, remove oldest and add new
+                # Remove old frame if exists (non-blocking)
                 try:
-                    old_frame = self._image_cache.get_nowait()
-                    self._image_cache.put_nowait((frame, timestamp))
-                    self.log.debug(f"Cache full, dropped old frame and added new frame at {timestamp:.3f}s")
+                    self._image_cache.get_nowait()
                 except queue.Empty:
-                    self.log.warning("Cache full but was empty when trying to remove frame")
+                    pass
+                # Add new frame (non-blocking)
+                self._image_cache.put_nowait((frame, timestamp))
+            except queue.Full:
+                # Should not happen with maxsize=1, but handle gracefully
+                try:
+                    self._image_cache.get_nowait()
+                    self._image_cache.put_nowait((frame, timestamp))
+                except queue.Empty:
+                    pass
             
-            # Update legacy latest for backward compatibility
+            # Update legacy latest for backward compatibility (minimal lock time)
             with self._lock:
                 self._latest_image = (frame, timestamp)
-                self._state.last_updated = timestamp
-
-            self.log.info(f"Camera frame successfully processed and cached: shape={frame.shape} at {timestamp:.3f}s")
+            
+            # Recording is done last to not delay cache update
+            # Recording operations are thread-safe internally
+            if self._recorder and self._recorder.is_recording():
+                self._recorder.record_image(frame, timestamp, state=synced_state)
         except Exception as e:
-            self.log.exception(f"Error decoding camera image: {e}", exc_info=True)
+            self.log.error(f"Error processing camera image: {e}")
 
     def fetch_camera_image(self) -> Optional[Tuple[np.ndarray, float]]:
         """
@@ -351,100 +313,63 @@ class RosClient(RosClientBase):
                     return None
                 cam_name = self._config.get("camera_topic", DEFAULT_TOPICS["camera"].name)
                 cam_type = self._config.get("camera_type", DEFAULT_TOPICS["camera"].type)
-                topic = self._ts_mgr.topic(cam_name, cam_type)
 
-            msg = topic.get_message(timeout=3.0)
-            if not msg:
-                self.log.warning("No image message received from ROS.")
-                return None
+            # Use temporary subscription to wait for one message
+            msg_received = threading.Event()
+            received_msg: Optional[Dict[str, Any]] = None
 
-            # decode as in update_camera (more verbose logging for diagnostics)
-            frame = None
-            if "data" in msg and isinstance(msg["data"], (bytes, bytearray)):
-                self.log.debug("fetch_camera_image: raw bytes payload")
-                np_arr = np.frombuffer(msg["data"], np.uint8)
-                frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
-            elif "data" in msg and isinstance(msg["data"], str):
-                self.log.debug("fetch_camera_image: base64 payload (decoding)")
-                try:
-                    # Step 1: Base64 decode
-                    self.log.debug(f"fetch_camera_image Step 1: Base64 decode from {len(msg['data'])} chars")
-                    img_data = base64.b64decode(msg["data"]) if msg["data"] else b""
-                    self.log.debug(f"fetch_camera_image Step 1: Decoded to {len(img_data)} bytes")
-                    
-                    # Step 2: Signature analysis
-                    self.log.debug(f"fetch_camera_image Step 2: Payload signature (hex): {img_data[:20].hex()}")
-                    if img_data.startswith(b'\xff\xd8\xff'):
-                        fmt = "JPEG"
-                    elif img_data.startswith(b'\x89PNG'):
-                        fmt = "PNG"
-                    else:
-                        fmt = "OTHER"
-                    self.log.debug(f"fetch_camera_image Step 2: Detected format: {fmt}")
-                    
-                    # Step 3: Convert to numpy array
-                    np_arr = np.frombuffer(img_data, np.uint8)
-                    self.log.debug(f"fetch_camera_image Step 3: Numpy array shape={np_arr.shape}, min={np_arr.min()}, max={np_arr.max()}")
-                    
-                    # Step 4: Decode with cv2
-                    self.log.debug(f"fetch_camera_image Step 4: Attempting cv2.imdecode(IMREAD_COLOR)")
-                    frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
-                    if frame is None:
-                        self.log.warning(f"fetch_camera_image Step 4: IMREAD_COLOR failed, trying IMREAD_UNCHANGED")
-                        frame = cv2.imdecode(np_arr, cv2.IMREAD_UNCHANGED)
-                    
-                    if frame is not None:
-                        self.log.debug(f"fetch_camera_image Step 4: SUCCESS - frame shape={frame.shape}, dtype={frame.dtype}")
-                    else:
-                        self.log.error(f"fetch_camera_image Step 4: FAILED - both decode flags returned None (format: {fmt})")
-                except Exception as e:
-                    self.log.error(f"fetch_camera_image base64 error: {type(e).__name__}: {e}", exc_info=True)
-                    return None
-            elif "encoding" in msg and "data" in msg:
-                h = int(msg.get("height", 0))
-                w = int(msg.get("width", 0))
-                encoding = msg.get("encoding", "bgr8")
-                channels = 3 if encoding in ("rgb8", "bgr8") else 1
-                img_data = np.frombuffer(msg["data"], dtype=np.uint8)
-                if h > 0 and w > 0 and img_data.size == h * w * channels:
-                    frame = img_data.reshape((h, w, channels))
-                else:
-                    self.log.warning("Image raw data size doesn't match dimensions")
-                    return None
+            def callback(msg: Dict[str, Any]) -> None:
+                nonlocal received_msg
+                received_msg = msg
+                msg_received.set()
+
+            topic = self._ts_mgr.topic(cam_name, cam_type)
+            topic.subscribe(callback)
+
+            # Wait for message with timeout
+            if msg_received.wait(timeout=3.0):
+                topic.unsubscribe()
+                if received_msg:
+                    result = self._image_processor.process_simple(received_msg)
+                    return result
             else:
-                self.log.warning("Unknown image message format.")
+                topic.unsubscribe()
+                self.log.warning("No image message received within timeout.")
                 return None
-
-            timestamp = time.time()
-            self.log.debug(f"Fetched image frame at {timestamp:.3f}s")
-            return frame, timestamp
-
         except Exception as e:
-            self.log.exception(f"Error fetching camera image: {e}")
+            self.log.error(f"Error fetching camera image: {e}")
             return None
 
     def get_latest_image(self) -> Optional[Tuple[np.ndarray, float]]:
         """
-        Get the latest received image from cache (non-blocking).
+        Get the latest received image from cache (non-blocking, optimized for low latency).
         
         Returns:
             Tuple of (image, timestamp) or None
         """
         # Try to get from cache first (non-blocking, fastest)
+        # Strategy: Get all available frames and keep only the latest
+        # This ensures we always get the most recent frame even if multiple frames arrived
+        latest = None
         try:
-            # Get all available frames and keep only the latest
-            latest = None
+            # Drain the queue to get the latest frame
             while True:
                 try:
                     latest = self._image_cache.get_nowait()
                 except queue.Empty:
                     break
+            # Put back the latest frame so it's available for next call
             if latest:
+                try:
+                    self._image_cache.put_nowait(latest)
+                except queue.Full:
+                    # Queue is full (shouldn't happen with maxsize=1), but we have the latest
+                    pass
                 return latest
         except Exception:
             pass
         
-        # Fallback to legacy latest
+        # Fallback to legacy latest (thread-safe read)
         with self._lock:
             return getattr(self, "_latest_image", None)
 
@@ -474,30 +399,47 @@ class RosClient(RosClientBase):
             return getattr(self, "_latest_point_cloud", None)
 
     def update_point_cloud(self, msg: Dict[str, Any]) -> None:
-        """Handle point cloud topic updates."""
+        """
+        Handle point cloud topic updates.
+        
+        Optimized for low latency: minimize processing time and lock holding.
+        This is called from ROS subscription callback (separate thread).
+        """
         try:
-            result = self._decode_point_cloud(msg)
+            result = self._pointcloud_processor.process(msg)
             if result:
                 points, ts = result
                 
-                # Update cache (non-blocking, drop old frames if queue is full)
+                # Synchronize state with point cloud timestamp (quick operation)
+                synced_state = self.sync_state_with_data(ts)
+                self._update_state_with_timestamp(ts)
+                
+                # Update cache first (non-blocking, highest priority for real-time display)
                 try:
+                    # Remove old frame if exists (non-blocking)
+                    try:
+                        self._pointcloud_cache.get_nowait()
+                    except queue.Empty:
+                        pass
+                    # Add new frame (non-blocking)
                     self._pointcloud_cache.put_nowait((points, ts))
                 except queue.Full:
-                    # Queue is full, remove oldest and add new
+                    # Should not happen with maxsize=1, but handle gracefully
                     try:
                         self._pointcloud_cache.get_nowait()
                         self._pointcloud_cache.put_nowait((points, ts))
                     except queue.Empty:
                         pass
                 
-                # Update legacy latest for backward compatibility
+                # Update legacy latest for backward compatibility (minimal lock time)
                 with self._lock:
                     self._latest_point_cloud = (points, ts)
-                    self._state.last_updated = ts
-                self.log.debug(f"Received point cloud frame with {len(points)} points at {ts:.3f}s")
+                
+                # Recording is done last to not delay cache update
+                if self._recorder and self._recorder.is_recording():
+                    self._recorder.record_pointcloud(points, ts, state=synced_state)
         except Exception as e:
-            self.log.exception(f"Error handling point cloud update: {e}")
+            self.log.error(f"Error handling point cloud update: {e}")
 
     def fetch_point_cloud(self) -> Optional[Tuple[np.ndarray, float]]:
         """
@@ -516,33 +458,42 @@ class RosClient(RosClientBase):
                 topic_name = conf.get("point_cloud_topic", "/drone_1_cloud_registered")
                 topic_type = conf.get("point_cloud_type", "sensor_msgs/PointCloud2")
 
-                topic = self._ensure_ts_mgr().topic(topic_name, topic_type)
+            # Use temporary subscription to wait for one message
+            msg_received = threading.Event()
+            received_msg: Optional[Dict[str, Any]] = None
 
-            msg = topic.get_message(timeout=3.0)
-            if not msg:
-                self.log.warning("No point cloud message received from ROS.")
+            def callback(msg: Dict[str, Any]) -> None:
+                nonlocal received_msg
+                received_msg = msg
+                msg_received.set()
+
+            topic = self._ensure_ts_mgr().topic(topic_name, topic_type)
+            topic.subscribe(callback)
+
+            # Wait for message with timeout
+            if msg_received.wait(timeout=3.0):
+                topic.unsubscribe()
+                if received_msg:
+                    return self._pointcloud_processor.process(received_msg)
+            else:
+                topic.unsubscribe()
+                self.log.warning("No point cloud message received within timeout.")
                 return None
-
-            if "data" not in msg or "fields" not in msg:
-                self.log.warning("Invalid PointCloud2 message format.")
-                return None
-
-            result = self._decode_point_cloud(msg)
-            if not result:
-                self.log.warning("Failed to decode point cloud.")
-                return None
-
-            points, ts = result
-            self.log.debug(f"Fetched point cloud with {len(points)} points at {ts:.3f}s")
-            return points, ts
-
         except Exception as e:
-            self.log.exception(f"Error fetching point cloud: {e}")
+            self.log.error(f"Error fetching point cloud: {e}")
             return None
 
     def update_battery(self, msg: Dict[str, Any]) -> None:
-        """Handle battery topic updates."""
+        """
+        Handle battery topic updates.
+        
+        Optimized for low latency: minimize lock holding time.
+        This is called from ROS subscription callback (separate thread).
+        """
         try:
+            update_timestamp = time.time()
+            
+            # Minimize lock scope
             with self._lock:
                 p = msg.get("percentage", msg.get("percent", msg.get("battery", 1.0)))
                 try:
@@ -550,14 +501,29 @@ class RosClient(RosClientBase):
                     self._state.battery = (p_val * 100.0) if p_val <= 1.0 else p_val
                 except Exception:
                     self.log.debug("Unable to parse battery percentage; leaving previous value")
-                self._state.last_updated = time.time()
-            self.log.debug(f"Battery: {self._state.battery:.1f}%")
+                self._state.last_updated = update_timestamp
+                # Add to state history for synchronization
+                self._add_state_to_history(self._state, update_timestamp)
+            
+            # Recording is done outside lock to minimize blocking
+            if self._recorder and self._recorder.is_recording():
+                with self._lock:
+                    state_snapshot = copy.copy(self._state)
+                self._recorder.record_state(state_snapshot, update_timestamp)
         except Exception as e:
-            self.log.exception(f"Error handling battery update: {e}")
+            self.log.error(f"Error handling battery update: {e}")
 
     def update_gps(self, msg: Dict[str, Any]) -> None:
-        """Handle GPS topic updates."""
+        """
+        Handle GPS topic updates.
+        
+        Optimized for low latency: minimize lock holding time.
+        This is called from ROS subscription callback (separate thread).
+        """
         try:
+            update_timestamp = time.time()
+            
+            # Minimize lock scope
             with self._lock:
                 try:
                     self._state.latitude = float(msg.get("latitude", msg.get("lat", self._state.latitude)))
@@ -565,15 +531,28 @@ class RosClient(RosClientBase):
                     self._state.altitude = float(msg.get("altitude", msg.get("alt", self._state.altitude)))
                 except Exception:
                     self.log.debug("Partial or invalid GPS data received")
-                self._state.last_updated = time.time()
-            self.log.debug(f"GPS: lat={self._state.latitude:.6f}, lon={self._state.longitude:.6f}")
+                self._state.last_updated = update_timestamp
+                # Add to state history for synchronization
+                self._add_state_to_history(self._state, update_timestamp)
+            
+            # Recording is done outside lock to minimize blocking
+            if self._recorder and self._recorder.is_recording():
+                with self._lock:
+                    state_snapshot = copy.copy(self._state)
+                self._recorder.record_state(state_snapshot, update_timestamp)
         except Exception as e:
-            self.log.exception(f"Error handling GPS update: {e}")
+            self.log.error(f"Error handling GPS update: {e}")
 
     def service_call(self, service_name: str, service_type: str, payload: Dict[str, Any],
                           timeout: Optional[float] = None, retries: Optional[int] = None) -> Dict[str, Any]:
         """
         Call a ROS service with retry logic.
+        
+        Architecture Note:
+        - This is a command operation (write operation)
+        - Uses ThreadPoolExecutor to avoid blocking the main thread
+        - Does not interfere with data acquisition (state/image/pointcloud callbacks)
+        - State updates continue independently via ROS topic subscriptions
         
         Args:
             service_name: Service name
@@ -619,6 +598,12 @@ class RosClient(RosClientBase):
                      retries: Optional[int] = None) -> None:
         """
         Publish to a ROS topic with retry logic.
+        
+        Architecture Note:
+        - This is a command operation (write operation)
+        - Non-blocking: roslibpy publish is asynchronous
+        - Does not interfere with data acquisition (state/image/pointcloud callbacks)
+        - State updates continue independently via ROS topic subscriptions
         
         Args:
             topic_name: Topic name

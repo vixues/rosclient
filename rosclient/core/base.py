@@ -1,18 +1,17 @@
 """Base class for ROS clients."""
 from __future__ import annotations
 
-import base64
+import copy
 import math
 import threading
 import time
 from abc import ABC, abstractmethod
-from typing import Optional, Dict, Any, Tuple, List
-
-import numpy as np
+from typing import Optional, Dict, Any
 
 from ..models.drone import DroneState
 from ..models.state import ConnectionState
 from ..utils.logger import setup_logger
+from .recorder import Recorder
 
 
 class RosClientBase(ABC):
@@ -35,6 +34,15 @@ class RosClientBase(ABC):
         self._connect_lock = threading.Lock()
         self._connecting = False
         self.log = setup_logger(self.__class__.__name__)
+        
+        # Recording support
+        self._recorder: Optional[Recorder] = None
+        self._recording_config = self._config.get("recording", {})
+        
+        # State synchronization support
+        self._state_sync_enabled = self._config.get("state_sync_enabled", True)
+        self._state_history: list[tuple[DroneState, float]] = []  # (state, timestamp) pairs
+        self._max_state_history = self._config.get("max_state_history", 100)
 
     def is_connected(self) -> bool:
         """
@@ -86,67 +94,6 @@ class RosClientBase(ABC):
         with self._lock:
             return (self._state.roll, self._state.pitch, self._state.yaw)
 
-    def _decode_point_cloud(self, msg: Dict[str, Any]) -> Optional[Tuple[np.ndarray, float]]:
-        """
-        Common decoder for PointCloud2-like messages. Returns (points, timestamp) or None.
-        
-        Args:
-            msg: PointCloud2 message dictionary
-            
-        Returns:
-            Tuple of (points array, timestamp) or None if decoding fails
-        """
-        try:
-            if "data" not in msg or "fields" not in msg:
-                return None
-
-            raw = msg["data"]
-            # some transports provide base64 strings; roslibpy may provide bytes
-            if isinstance(raw, str):
-                raw_data = base64.b64decode(raw)
-            elif isinstance(raw, (bytes, bytearray)):
-                raw_data = bytes(raw)
-            else:
-                self.log.debug("Unsupported point cloud data type")
-                return None
-
-            np_data = np.frombuffer(raw_data, dtype=np.uint8)
-            fields = msg["fields"]
-            point_step = int(msg.get("point_step", 0))
-            if point_step <= 0:
-                self.log.debug("Invalid point_step")
-                return None
-
-            # find offsets
-            x_offset = next((f["offset"] for f in fields if f["name"] == "x"), None)
-            y_offset = next((f["offset"] for f in fields if f["name"] == "y"), None)
-            z_offset = next((f["offset"] for f in fields if f["name"] == "z"), None)
-            if None in (x_offset, y_offset, z_offset):
-                self.log.debug("Missing x/y/z fields in PointCloud2.")
-                return None
-
-            points: List[Tuple[float, float, float]] = []
-            total_len = len(np_data)
-            # iterate safely
-            for i in range(0, total_len - point_step + 1, point_step):
-                # extract 4-byte floats; ensure slice is within bounds
-                try:
-                    x = np.frombuffer(np_data[i + x_offset:i + x_offset + 4], dtype=np.float32)[0]
-                    y = np.frombuffer(np_data[i + y_offset:i + y_offset + 4], dtype=np.float32)[0]
-                    z = np.frombuffer(np_data[i + z_offset:i + z_offset + 4], dtype=np.float32)[0]
-                    points.append((x, y, z))
-                except Exception:
-                    # skip malformed point
-                    continue
-
-            if not points:
-                return None
-
-            points_arr = np.array(points, dtype=np.float32)
-            return points_arr, time.time()
-        except Exception:
-            return None
-        
     def update_odom(self, msg: Dict[str, Any]) -> None:
         """
         Update odometry from ROS message.
@@ -196,8 +143,212 @@ class RosClientBase(ABC):
                 except Exception:
                     self.log.debug("Partial or invalid odometry position data; skipping position update")
 
-                self._state.last_updated = time.time()
+                update_timestamp = time.time()
+                self._state.last_updated = update_timestamp
+                # Add to state history for synchronization
+                self._add_state_to_history(self._state, update_timestamp)
             self.log.debug(f"Odometry updated: roll={roll_deg:.3f}, pitch={pitch_deg:.3f}, yaw={yaw_deg:.3f}")
+            
+            # Record state if recording is enabled
+            if self._recorder and self._recorder.is_recording():
+                with self._lock:
+                    self._recorder.record_state(self._state, update_timestamp)
         except Exception as e:
             self.log.exception(f"Error handling odometry update: {e}")
+    
+    # ---------- Recording methods ----------
+    
+    def start_recording(
+        self,
+        record_images: bool = True,
+        record_pointclouds: bool = True,
+        record_states: bool = True,
+        image_quality: int = 85,
+        **kwargs
+    ) -> bool:
+        """
+        Start recording data from the client.
+        
+        Args:
+            record_images: Whether to record images
+            record_pointclouds: Whether to record point clouds
+            record_states: Whether to record states
+            image_quality: JPEG quality (1-100) for image compression
+            **kwargs: Additional recorder configuration
+            
+        Returns:
+            True if recording started successfully
+        """
+        try:
+            if self._recorder and self._recorder.is_recording():
+                self.log.warning("Recording already in progress")
+                return False
+            
+            # Create recorder if needed
+            if self._recorder is None:
+                self._recorder = Recorder(
+                    record_images=record_images,
+                    record_pointclouds=record_pointclouds,
+                    record_states=record_states,
+                    image_quality=image_quality,
+                    max_queue_size=self._recording_config.get("max_queue_size", 100),
+                    batch_size=self._recording_config.get("batch_size", 10),
+                    logger=self.log
+                )
+            
+            # Start recording
+            self._recorder.start_recording(
+                client_type=self.__class__.__name__,
+                connection_str=self.connection_str,
+                config=self._config
+            )
+            
+            self.log.info("Recording started")
+            return True
+        except Exception as e:
+            self.log.error(f"Failed to start recording: {e}")
+            return False
+    
+    def stop_recording(self) -> bool:
+        """
+        Stop recording.
+        
+        Returns:
+            True if recording stopped successfully
+        """
+        try:
+            if self._recorder and self._recorder.is_recording():
+                self._recorder.stop_recording()
+                self.log.info("Recording stopped")
+                return True
+            return False
+        except Exception as e:
+            self.log.error(f"Failed to stop recording: {e}")
+            return False
+    
+    def save_recording(self, file_path: str, compress: bool = True) -> bool:
+        """
+        Save recorded data to file.
+        
+        Args:
+            file_path: Path to save file
+            compress: Whether to compress the file
+            
+        Returns:
+            True if saved successfully
+        """
+        try:
+            if not self._recorder:
+                self.log.error("No recorder available")
+                return False
+            
+            return self._recorder.save(file_path, compress=compress)
+        except Exception as e:
+            self.log.error(f"Failed to save recording: {e}")
+            return False
+    
+    def is_recording(self) -> bool:
+        """Check if currently recording."""
+        return self._recorder is not None and self._recorder.is_recording()
+    
+    def get_recorder(self) -> Optional[Recorder]:
+        """Get the recorder instance."""
+        return self._recorder
+    
+    def get_recording_statistics(self) -> Optional[Dict[str, Any]]:
+        """Get recording statistics."""
+        if self._recorder:
+            return self._recorder.get_statistics()
+        return None
+    
+    # ---------- State synchronization methods ----------
+    
+    def _add_state_to_history(self, state: DroneState, timestamp: float) -> None:
+        """
+        Add state snapshot to history for synchronization.
+        
+        Args:
+            state: State snapshot
+            timestamp: Timestamp of the state
+        """
+        if not self._state_sync_enabled:
+            return
+        
+        with self._lock:
+            # Create a deep copy to avoid reference issues
+            state_copy = copy.deepcopy(state)
+            self._state_history.append((state_copy, timestamp))
+            
+            # Keep history size bounded
+            if len(self._state_history) > self._max_state_history:
+                self._state_history.pop(0)
+    
+    def get_state_at_timestamp(self, timestamp: float, tolerance: float = 0.1) -> Optional[DroneState]:
+        """
+        Get state snapshot closest to the given timestamp.
+        
+        Args:
+            timestamp: Target timestamp
+            tolerance: Maximum time difference in seconds
+            
+        Returns:
+            State snapshot or None if not found within tolerance
+        """
+        if not self._state_sync_enabled or not self._state_history:
+            # Fallback to current state
+            with self._lock:
+                return copy.deepcopy(self._state)
+        
+        with self._lock:
+            # Find closest state in history
+            best_state = None
+            best_diff = float('inf')
+            
+            for state, state_ts in self._state_history:
+                diff = abs(state_ts - timestamp)
+                if diff < best_diff:
+                    best_diff = diff
+                    best_state = state
+            
+            # If within tolerance, return it; otherwise return current state
+            if best_diff <= tolerance and best_state:
+                return copy.deepcopy(best_state)
+            else:
+                # Return current state as fallback
+                return copy.deepcopy(self._state)
+    
+    def _update_state_with_timestamp(self, timestamp: float) -> None:
+        """
+        Update state's last_updated timestamp and add to history.
+        
+        Args:
+            timestamp: Timestamp to set
+        """
+        with self._lock:
+            self._state.last_updated = timestamp
+            self._add_state_to_history(self._state, timestamp)
+    
+    def sync_state_with_data(self, data_timestamp: float) -> DroneState:
+        """
+        Get synchronized state for a given data timestamp.
+        This ensures state is aligned with image/pointcloud timestamps.
+        
+        Args:
+            data_timestamp: Timestamp of the data (image/pointcloud)
+            
+        Returns:
+            Synchronized state snapshot
+        """
+        if not self._state_sync_enabled:
+            with self._lock:
+                return copy.deepcopy(self._state)
+        
+        # Get state closest to data timestamp
+        synced_state = self.get_state_at_timestamp(data_timestamp, tolerance=0.5)
+        if synced_state:
+            return synced_state
+        
+        # Fallback: return current state
+        with self._lock:
+            return copy.deepcopy(self._state)
 
