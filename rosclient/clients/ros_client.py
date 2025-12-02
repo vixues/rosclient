@@ -1,6 +1,7 @@
 """Production ROS client implementation."""
 from __future__ import annotations
 
+import copy
 import logging
 import queue
 import random
@@ -24,7 +25,16 @@ from .config import DEFAULT_CONFIG, DEFAULT_TOPICS
 
 
 class RosClient(RosClientBase):
-    """Production ROS client using roslibpy."""
+    """
+    Production ROS client using roslibpy.
+    
+    Architecture Design:
+    - Acts as a mediator/proxy client between GUI and ROS device
+    - Uses ROS topic subscriptions for real-time data acquisition (non-blocking)
+    - Command operations (service_call, publish) are asynchronous and don't block data flow
+    - Optimized for low latency: minimizes lock holding time in callbacks
+    - Data acquisition callbacks run in separate threads, ensuring real-time updates
+    """
 
     def __init__(self, connection_str: str, config: Optional[Dict[str, Any]] = None):
         """
@@ -52,9 +62,10 @@ class RosClient(RosClientBase):
         self._ts_mgr: Optional[TopicServiceManager] = None
         
         # High-frequency cache for images and point clouds
-        # Use queues with maxsize to keep only the latest frames (drop old ones)
-        self._image_cache: queue.Queue = queue.Queue(maxsize=3)  # Keep latest 3 frames
-        self._pointcloud_cache: queue.Queue = queue.Queue(maxsize=3)  # Keep latest 3 frames
+        # Use queues with maxsize=1 for lowest latency (always get latest frame)
+        # This ensures we always have the most recent frame without blocking
+        self._image_cache: queue.Queue = queue.Queue(maxsize=1)  # Keep only latest frame (lowest latency)
+        self._pointcloud_cache: queue.Queue = queue.Queue(maxsize=1)  # Keep only latest frame
         
         # Legacy support - keep latest for backward compatibility
         self._latest_image: Optional[Tuple[np.ndarray, float]] = None
@@ -182,9 +193,16 @@ class RosClient(RosClientBase):
     # ---------- topic handlers ----------
 
     def update_state(self, msg: Dict[str, Any]) -> None:
-        """Handle state topic updates."""
+        """
+        Handle state topic updates.
+        
+        Optimized for low latency: minimize lock holding time.
+        This is called from ROS subscription callback (separate thread).
+        """
         try:
             update_timestamp = time.time()
+            
+            # Minimize lock scope - only hold lock for state update
             with self._lock:
                 self._state.connected = True
                 self._state.armed = bool(msg.get("armed", self._state.armed))
@@ -193,17 +211,27 @@ class RosClient(RosClientBase):
                 # Add to state history for synchronization
                 self._add_state_to_history(self._state, update_timestamp)
             
-            # Record state if recording is enabled
+            # Recording is done outside lock to minimize blocking
+            # Recording operations are thread-safe internally
             if self._recorder and self._recorder.is_recording():
+                # Get state snapshot for recording (quick read)
                 with self._lock:
-                    self._recorder.record_state(self._state, update_timestamp)
+                    state_snapshot = copy.copy(self._state)
+                self._recorder.record_state(state_snapshot, update_timestamp)
         except Exception as e:
             self.log.error(f"Error handling state update: {e}")
 
     def update_drone_state(self, msg: Dict[str, Any]) -> None:
-        """Handle drone state topic updates."""
+        """
+        Handle drone state topic updates.
+        
+        Optimized for low latency: minimize lock holding time.
+        This is called from ROS subscription callback (separate thread).
+        """
         try:
             update_timestamp = time.time()
+            
+            # Minimize lock scope - only hold lock for state update
             with self._lock:
                 self._state.landed = bool(msg.get("landed", self._state.landed))
                 self._state.returned = bool(msg.get("returned", self._state.returned))
@@ -213,15 +241,22 @@ class RosClient(RosClientBase):
                 # Add to state history for synchronization
                 self._add_state_to_history(self._state, update_timestamp)
             
-            # Record state if recording is enabled
+            # Recording is done outside lock to minimize blocking
             if self._recorder and self._recorder.is_recording():
+                # Get state snapshot for recording (quick read)
                 with self._lock:
-                    self._recorder.record_state(self._state, update_timestamp)
+                    state_snapshot = copy.copy(self._state)
+                self._recorder.record_state(state_snapshot, update_timestamp)
         except Exception as e:
             self.log.error(f"Error handling drone state update: {e}")
 
     def update_camera(self, msg: Dict[str, Any]) -> None:
-        """Receive camera image messages and convert to OpenCV format."""
+        """
+        Receive camera image messages and convert to OpenCV format.
+        
+        Optimized for low latency: minimize processing time and lock holding.
+        This is called from ROS subscription callback (separate thread).
+        """
         try:
             # Use simple processing for subscription (no plugins to avoid blocking)
             result = self._image_processor.process_simple(msg)
@@ -231,27 +266,36 @@ class RosClient(RosClientBase):
             
             frame, timestamp = result
             
-            # Synchronize state with image timestamp
+            # Synchronize state with image timestamp (quick operation)
             synced_state = self.sync_state_with_data(timestamp)
             self._update_state_with_timestamp(timestamp)
             
-            # Record image with synchronized state if recording is enabled
-            if self._recorder and self._recorder.is_recording():
-                self._recorder.record_image(frame, timestamp, state=synced_state)
-            
-            # Update cache (non-blocking, drop old frames if queue is full)
+            # Update cache first (non-blocking, highest priority for real-time display)
+            # Use put_nowait with get_nowait to ensure we always have the latest frame
             try:
+                # Remove old frame if exists (non-blocking)
+                try:
+                    self._image_cache.get_nowait()
+                except queue.Empty:
+                    pass
+                # Add new frame (non-blocking)
                 self._image_cache.put_nowait((frame, timestamp))
             except queue.Full:
+                # Should not happen with maxsize=1, but handle gracefully
                 try:
                     self._image_cache.get_nowait()
                     self._image_cache.put_nowait((frame, timestamp))
                 except queue.Empty:
                     pass
             
-            # Update legacy latest for backward compatibility
+            # Update legacy latest for backward compatibility (minimal lock time)
             with self._lock:
                 self._latest_image = (frame, timestamp)
+            
+            # Recording is done last to not delay cache update
+            # Recording operations are thread-safe internally
+            if self._recorder and self._recorder.is_recording():
+                self._recorder.record_image(frame, timestamp, state=synced_state)
         except Exception as e:
             self.log.error(f"Error processing camera image: {e}")
 
@@ -298,26 +342,34 @@ class RosClient(RosClientBase):
 
     def get_latest_image(self) -> Optional[Tuple[np.ndarray, float]]:
         """
-        Get the latest received image from cache (non-blocking).
+        Get the latest received image from cache (non-blocking, optimized for low latency).
         
         Returns:
             Tuple of (image, timestamp) or None
         """
         # Try to get from cache first (non-blocking, fastest)
+        # Strategy: Get all available frames and keep only the latest
+        # This ensures we always get the most recent frame even if multiple frames arrived
+        latest = None
         try:
-            # Get all available frames and keep only the latest
-            latest = None
+            # Drain the queue to get the latest frame
             while True:
                 try:
                     latest = self._image_cache.get_nowait()
                 except queue.Empty:
                     break
+            # Put back the latest frame so it's available for next call
             if latest:
+                try:
+                    self._image_cache.put_nowait(latest)
+                except queue.Full:
+                    # Queue is full (shouldn't happen with maxsize=1), but we have the latest
+                    pass
                 return latest
         except Exception:
             pass
         
-        # Fallback to legacy latest
+        # Fallback to legacy latest (thread-safe read)
         with self._lock:
             return getattr(self, "_latest_image", None)
 
@@ -347,33 +399,45 @@ class RosClient(RosClientBase):
             return getattr(self, "_latest_point_cloud", None)
 
     def update_point_cloud(self, msg: Dict[str, Any]) -> None:
-        """Handle point cloud topic updates."""
+        """
+        Handle point cloud topic updates.
+        
+        Optimized for low latency: minimize processing time and lock holding.
+        This is called from ROS subscription callback (separate thread).
+        """
         try:
             result = self._pointcloud_processor.process(msg)
             if result:
                 points, ts = result
                 
-                # Synchronize state with point cloud timestamp
+                # Synchronize state with point cloud timestamp (quick operation)
                 synced_state = self.sync_state_with_data(ts)
                 self._update_state_with_timestamp(ts)
                 
-                # Record point cloud with synchronized state if recording is enabled
-                if self._recorder and self._recorder.is_recording():
-                    self._recorder.record_pointcloud(points, ts, state=synced_state)
-                
-                # Update cache (non-blocking, drop old frames if queue is full)
+                # Update cache first (non-blocking, highest priority for real-time display)
                 try:
+                    # Remove old frame if exists (non-blocking)
+                    try:
+                        self._pointcloud_cache.get_nowait()
+                    except queue.Empty:
+                        pass
+                    # Add new frame (non-blocking)
                     self._pointcloud_cache.put_nowait((points, ts))
                 except queue.Full:
+                    # Should not happen with maxsize=1, but handle gracefully
                     try:
                         self._pointcloud_cache.get_nowait()
                         self._pointcloud_cache.put_nowait((points, ts))
                     except queue.Empty:
                         pass
                 
-                # Update legacy latest for backward compatibility
+                # Update legacy latest for backward compatibility (minimal lock time)
                 with self._lock:
                     self._latest_point_cloud = (points, ts)
+                
+                # Recording is done last to not delay cache update
+                if self._recorder and self._recorder.is_recording():
+                    self._recorder.record_pointcloud(points, ts, state=synced_state)
         except Exception as e:
             self.log.error(f"Error handling point cloud update: {e}")
 
@@ -420,9 +484,16 @@ class RosClient(RosClientBase):
             return None
 
     def update_battery(self, msg: Dict[str, Any]) -> None:
-        """Handle battery topic updates."""
+        """
+        Handle battery topic updates.
+        
+        Optimized for low latency: minimize lock holding time.
+        This is called from ROS subscription callback (separate thread).
+        """
         try:
             update_timestamp = time.time()
+            
+            # Minimize lock scope
             with self._lock:
                 p = msg.get("percentage", msg.get("percent", msg.get("battery", 1.0)))
                 try:
@@ -434,17 +505,25 @@ class RosClient(RosClientBase):
                 # Add to state history for synchronization
                 self._add_state_to_history(self._state, update_timestamp)
             
-            # Record state if recording is enabled
+            # Recording is done outside lock to minimize blocking
             if self._recorder and self._recorder.is_recording():
                 with self._lock:
-                    self._recorder.record_state(self._state, update_timestamp)
+                    state_snapshot = copy.copy(self._state)
+                self._recorder.record_state(state_snapshot, update_timestamp)
         except Exception as e:
             self.log.error(f"Error handling battery update: {e}")
 
     def update_gps(self, msg: Dict[str, Any]) -> None:
-        """Handle GPS topic updates."""
+        """
+        Handle GPS topic updates.
+        
+        Optimized for low latency: minimize lock holding time.
+        This is called from ROS subscription callback (separate thread).
+        """
         try:
             update_timestamp = time.time()
+            
+            # Minimize lock scope
             with self._lock:
                 try:
                     self._state.latitude = float(msg.get("latitude", msg.get("lat", self._state.latitude)))
@@ -456,10 +535,11 @@ class RosClient(RosClientBase):
                 # Add to state history for synchronization
                 self._add_state_to_history(self._state, update_timestamp)
             
-            # Record state if recording is enabled
+            # Recording is done outside lock to minimize blocking
             if self._recorder and self._recorder.is_recording():
                 with self._lock:
-                    self._recorder.record_state(self._state, update_timestamp)
+                    state_snapshot = copy.copy(self._state)
+                self._recorder.record_state(state_snapshot, update_timestamp)
         except Exception as e:
             self.log.error(f"Error handling GPS update: {e}")
 
@@ -467,6 +547,12 @@ class RosClient(RosClientBase):
                           timeout: Optional[float] = None, retries: Optional[int] = None) -> Dict[str, Any]:
         """
         Call a ROS service with retry logic.
+        
+        Architecture Note:
+        - This is a command operation (write operation)
+        - Uses ThreadPoolExecutor to avoid blocking the main thread
+        - Does not interfere with data acquisition (state/image/pointcloud callbacks)
+        - State updates continue independently via ROS topic subscriptions
         
         Args:
             service_name: Service name
@@ -512,6 +598,12 @@ class RosClient(RosClientBase):
                      retries: Optional[int] = None) -> None:
         """
         Publish to a ROS topic with retry logic.
+        
+        Architecture Note:
+        - This is a command operation (write operation)
+        - Non-blocking: roslibpy publish is asynchronous
+        - Does not interfere with data acquisition (state/image/pointcloud callbacks)
+        - State updates continue independently via ROS topic subscriptions
         
         Args:
             topic_name: Topic name
