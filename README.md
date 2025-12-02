@@ -87,6 +87,7 @@ rosclient/
 │   │   ├── base.py        # 基类
 │   │   └── topic_service_manager.py  # Topic/Service管理器
 │   ├── clients/           # 客户端实现
+│   │   ├── airsim_client.py  # AirSim仿真环境客户端
 │   │   ├── ros_client.py  # 生产环境客户端
 │   │   ├── mock_client.py # Mock客户端
 │   │   └── config.py      # 配置
@@ -155,7 +156,7 @@ state = ConnectionState.CONNECTED
 项目包含一个图形界面测试工具，方便测试和调试：
 
 ```bash
-python rosclient_gui_test.py
+python gui_tkinter.py
 ```
 
 GUI工具提供以下功能：
