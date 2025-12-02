@@ -1,0 +1,67 @@
+[build-system]
+requires = ["setuptools>=61.0,<70", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rosclient"
+version = "1.0.0"
+description = "A Python client library for connecting and controlling ROS (Robot Operating System) devices, optimized for drone control scenarios"
+readme = "README.md"
+requires-python = ">=3.7"
+license = {text = "MIT"}
+authors = [
+    {name = "vixues"}
+]
+keywords = ["ros", "robot", "drone", "rosbridge", "websocket", "robotics"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.7",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: System :: Hardware",
+]
+dependencies = [
+    "roslibpy>=0.7.0",
+    "numpy>=1.19.0",
+]
+
+[project.optional-dependencies]
+image = [
+    "opencv-python>=4.5.0",
+    "Pillow>=8.0.0",
+]
+pointcloud = [
+    "matplotlib>=3.3.0",
+]
+recording = [
+    "msgpack>=1.0.0",
+]
+all = [
+    "opencv-python>=4.5.0",
+    "Pillow>=8.0.0",
+    "matplotlib>=3.3.0",
+    "msgpack>=1.0.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/vixues/rosclient"
+Documentation = "https://github.com/vixues/rosclient#readme"
+Repository = "https://github.com/vixues/rosclient"
+Issues = "https://github.com/vixues/rosclient/issues"
+
+[tool.setuptools]
+packages = ["rosclient", "rosclient.clients", "rosclient.core", "rosclient.models", "rosclient.processors", "rosclient.utils"]
+
+[tool.setuptools.package-data]
+rosclient = ["*.md"]
+

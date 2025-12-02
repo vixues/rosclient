@@ -15,7 +15,22 @@
 
 ## 安装
 
-### 基本安装
+### 从 PyPI 安装（推荐）
+
+```bash
+# 基本安装（仅核心功能）
+pip install rosclient
+
+# 完整安装（包含所有可选功能）
+pip install rosclient[all]
+
+# 或分别安装可选功能
+pip install rosclient[image]      # 图像处理功能
+pip install rosclient[pointcloud] # 点云可视化功能
+pip install rosclient[recording]  # 记录功能
+```
+
+### 从源码安装
 
 ```bash
 # 克隆仓库
@@ -24,6 +39,9 @@ cd rosclient
 
 # 安装依赖
 pip install roslibpy numpy
+
+# 安装包
+pip install -e .
 ```
 
 ### 完整安装（包含图像和点云功能）
